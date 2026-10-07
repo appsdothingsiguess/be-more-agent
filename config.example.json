@@ -23,7 +23,7 @@
     "alsa_card": null,
     "set_volume": true,
     "volume_control": "PCM",
-    "volume": "100%"
+    "volume": "50%"
   },
 
   "camera": {

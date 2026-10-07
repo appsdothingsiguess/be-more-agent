@@ -56,11 +56,11 @@ def test_effects(tmp_path):
     sp.stop()
 
 
-def test_configure_sets_volume_to_100(tmp_path):
+def test_configure_sets_default_volume(tmp_path):
     calls = []
     run = lambda argv, **kw: calls.append(argv) or subprocess.CompletedProcess(argv, 0, "", "")
     Speaker(SpeakerConfig(), tmp_path, cards=CARDS, run=run).configure()
-    assert calls == [["amixer", "-c", "UACDemoV10", "sset", "PCM", "100%", "unmute"]]
+    assert calls == [["amixer", "-c", "UACDemoV10", "sset", "PCM", "50%", "unmute"]]
 
 
 def test_configure_tolerates_failure_and_can_be_disabled(tmp_path):
