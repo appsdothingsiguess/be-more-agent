@@ -20,6 +20,7 @@ from typing import Any, Callable
 from app.config import Config
 from app.hardware.camera import CameraError
 from app.hardware.input import Action
+from app.memory import ConversationMemory, is_forget_command
 from app.notify import ERRORS, NOTICES, SERVER_CODES, SOFT, clip_path
 from app.server.errors import (AuthError, BadResponse, BMOError, RequestCancelled,
                                ReservationTimeout, ServerBusy, ServerUnavailable)
@@ -60,6 +61,9 @@ class InteractionController:
         reservation.on_wait = self._on_server_wait
 
         cfg.runtime_path.mkdir(parents=True, exist_ok=True)
+        self.memory = ConversationMemory(cfg.runtime_path / cfg.memory.file,
+                                         cfg.memory.max_messages, cfg.memory.max_chars)
+        self._memory_epoch = 0  # bumped by every clear; a turn started before one is not stored
 
     # ------------------------------------------------------------------ state
     @property
@@ -244,9 +248,72 @@ class InteractionController:
             self.interrupt()
         elif self._state is BotState.LISTENING:
             self._abort_listening()
+        if is_forget_command(text):
+            self._show(text, "user")
+            threading.Thread(target=self.forget_memory, name="bmo-forget", daemon=True).start()
+            self._show("Okay! BMO forgot everything.", "bmo")
+            return
         with self._lock:
             gen = self._generation
         self._spawn(gen, text=text, speak=speak)
+
+    # ----------------------------------------------------------------- memory
+    def _clear_memory(self) -> None:
+        with self._lock:
+            self._memory_epoch += 1
+        self.memory.clear()
+
+    def forget_memory(self) -> dict:
+        """Wipe short-term memory here and long-term memory on the server. Never raises."""
+        out: dict = {"local_cleared": True, "server": "ok", "forgotten": None}
+        try:
+            self._clear_memory()
+        except Exception:
+            log.exception("Clearing local memory failed")
+        try:
+            n = self.client.forget_memories()
+            if n is None:
+                out["server"] = "unavailable"
+            else:
+                out["forgotten"] = n
+        except Exception as e:
+            log.warning("Server forget failed: %s", e)
+            out["server"] = "error"
+        return out
+
+    def list_memories(self) -> dict:
+        try:
+            memories = self.client.list_memories()
+        except Exception as e:
+            log.warning("Listing memories failed: %s", e)
+            return {"available": False, "memories": [], "error": type(e).__name__}
+        if memories is None:
+            return {"available": False, "memories": [], "error": None}
+        return {"available": True, "memories": memories, "error": None}
+
+    def delete_memory(self, memory_id: int) -> dict:
+        try:
+            ok = self.client.delete_memory(memory_id)
+        except Exception as e:
+            log.warning("Deleting memory %s failed: %s", memory_id, e)
+            return {"available": True, "deleted": False}
+        if ok is None:
+            return {"available": False, "deleted": False}
+        return {"available": True, "deleted": bool(ok)}
+
+    def conversation(self) -> list[dict]:
+        return self.memory.messages()
+
+    def _remember(self, result, text: str | None, use_memory: bool, epoch: int) -> None:
+        raw = getattr(result, "raw", None) or {}
+        if raw.get("memory_reset"):
+            self._clear_memory()
+            return
+        question = result.transcript or text
+        with self._lock:
+            unchanged = epoch == self._memory_epoch
+        if use_memory and unchanged and question and result.text:
+            self.memory.add_exchange(question, result.text)
 
     # -------------------------------------------------------------- listening
     def _start_listening(self) -> None:
@@ -331,6 +398,9 @@ class InteractionController:
                   speak: bool | None = None) -> None:
         if speak is None:
             speak = not self.cfg.ui.text_only
+        with self._lock:
+            epoch = self._memory_epoch
+        use_memory = self.cfg.memory.enabled
         try:
             audio = None
             if record:
@@ -372,8 +442,10 @@ class InteractionController:
                     return
                 self._active_request_id = request_id
             try:
+                extra = ({"history": self.memory.messages(), "memory": True}
+                         if use_memory else {"memory": False})
                 result = self.client.interact(text=text, audio_path=audio, image_path=image,
-                                              speak=speak, request_id=request_id)
+                                              speak=speak, request_id=request_id, **extra)
             finally:
                 with self._lock:
                     if self._active_request_id == request_id:
@@ -382,6 +454,7 @@ class InteractionController:
                 log.info("Dropping response for interrupted request %s", request_id)
                 return
             self.reservation.renewed()
+            self._remember(result, text, use_memory, epoch)
 
             self.last_transcript = result.transcript or text
             self.last_reply = result.text

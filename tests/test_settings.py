@@ -75,3 +75,12 @@ def test_unavailable_cancel_code_and_plain_errors():
         BMOClient._raise_for(_response(409, {"status": "unavailable", "code": "request_cancelled"}))
     with pytest.raises(ServerUnavailable):
         BMOClient._raise_for(_response(503, b"oops", "text/plain"))
+
+
+def test_memory_enabled_setting(tmp_path):
+    cfg = make_cfg(tmp_path)
+    assert "memory.enabled" in SETTINGS
+    assert set_setting(cfg, "memory.enabled", False) is False
+    assert cfg.memory.enabled is False
+    with pytest.raises(SettingError):
+        set_setting(cfg, "memory.enabled", "off")

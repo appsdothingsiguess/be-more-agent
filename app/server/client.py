@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import logging
 import os
 import time
@@ -182,6 +183,8 @@ class BMOClient:
         image_path: str | None = None,
         speak: bool = True,
         request_id: str | None = None,
+        history: list[dict] | None = None,
+        memory: bool | None = None,
     ) -> InteractResult:
         if not text and not audio_path:
             raise ValueError("interact requires text or audio_path")
@@ -190,6 +193,10 @@ class BMOClient:
         files: dict[str, Any] = {"speak": (None, "true" if speak else "false")}
         if text:
             files["text"] = (None, text)
+        if history:
+            files["history"] = (None, json.dumps(history))
+        if memory is not None:
+            files["memory"] = (None, "on" if memory else "off")
         handles = []
         try:
             if audio_path:
@@ -224,6 +231,33 @@ class BMOClient:
             audio_wav=audio,
             raw=raw,
         )
+
+    # -- long-term memory (404 = server has no memory routes) --------------
+
+    def list_memories(self, limit: int = 50, offset: int = 0) -> list[dict] | None:
+        r = self._short("GET", "/v1/bmo/memories", ok=(404,),
+                        params={"limit": limit, "offset": offset})
+        if r.status_code == 404:
+            return None
+        body = self._json(r)
+        try:
+            return list(body["memories"])
+        except (KeyError, TypeError) as e:
+            raise BadResponse("malformed memories response", status=r.status_code) from e
+
+    def forget_memories(self) -> int | None:
+        r = self._short("DELETE", "/v1/bmo/memories", ok=(404,))
+        if r.status_code == 404:
+            return None
+        body = self._json(r)
+        try:
+            return int(body["forgotten"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise BadResponse("malformed forget response", status=r.status_code) from e
+
+    def delete_memory(self, memory_id: int) -> bool | None:
+        r = self._short("DELETE", f"/v1/bmo/memories/{int(memory_id)}", ok=(404,))
+        return None if r.status_code == 404 else True
 
     def transcribe(self, audio_path: str, request_id: str | None = None) -> str:
         rid = request_id or self.new_request_id()

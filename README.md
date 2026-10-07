@@ -81,8 +81,9 @@ Edit `config.json` (copied from `config.example.json`). Any subset of keys overr
 | `sounds.*` | all `true` | Greeting, ack and thinking sounds |
 | `input.evdev_enabled`, `.evdev_device` | `true`, `auto` | Read HID keyboards from `/dev/input` |
 | `wake_word.enabled` | `false` | Optional OpenWakeWord |
+| `memory.enabled`, `.max_messages`, `.max_chars` | `true`, `10`, `6000` | Conversation memory: recent exchanges (saved to `runtime/memory.json`) are sent with each turn, and the server's long-term recall is used. Saying or typing "forget everything" wipes both |
 
-Settings changed from the web page (volume, mute, camera mode, sound effects, mic boost) are saved to `runtime/settings.json` and override `config.json` at the next start.
+Settings changed from the web page (volume, mute, camera mode, sound effects, mic boost, memory) are saved to `runtime/settings.json` and override `config.json` at the next start.
 
 Environment overrides: `BMO_SERVER_URL` (or `BMO_URL`), `BMO_MIC_DEVICE`, `BMO_SPEAKER_DEVICE`, `BMO_MIC_GAIN_DB`.
 

@@ -35,6 +35,15 @@ def parse_multipart(content_type: str, body: bytes) -> dict:
     return out
 
 
+def multipart_values(content_type: str, body: bytes) -> dict:
+    """Return {field_name: text} for the non-file parts of a multipart body."""
+    msg = BytesParser(policy=email_default).parsebytes(
+        b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body
+    )
+    return {part.get_param("name", header="content-disposition"): part.get_content()
+            for part in msg.iter_parts() if part.get_filename() is None}
+
+
 class FakeBMOServer:
     def __init__(self):
         self.requests: list[dict] = []
@@ -44,6 +53,10 @@ class FakeBMOServer:
         self.interact_delay = 0.0
         self.interact_audio_b64: str | None = base64.b64encode(tiny_wav()).decode()
         self.cancel_status = 200
+        self.memory_routes = True  # False = the server predates memory (404)
+        self.memories: list[dict] = [{"id": 1, "content": "likes tea", "type": "fact",
+                                      "created_at": "2026-01-01"}]
+        self.interact_extra: dict = {}
         self.cancelled = threading.Event()
         self.interact_started = threading.Event()
         self._lock = threading.Lock()
@@ -67,7 +80,8 @@ class FakeBMOServer:
                 ctype = self.headers.get("Content-Type", "")
                 rec = {
                     "method": self.command,
-                    "path": self.path,
+                    "path": self.path.split("?")[0],
+                    "query": self.path.partition("?")[2],
                     "headers": {k.lower(): v for k, v in self.headers.items()},
                     "json": None,
                     "fields": None,
@@ -76,6 +90,7 @@ class FakeBMOServer:
                     rec["json"] = json.loads(body)
                 elif ctype.startswith("multipart/"):
                     rec["fields"] = parse_multipart(ctype, body)
+                    rec["values"] = multipart_values(ctype, body)
                     rec["form_body"] = body
                 with outer._lock:
                     outer.requests.append(rec)
@@ -133,7 +148,8 @@ class FakeBMOServer:
             outer.interact_started.set()
             if self.interact_delay:
                 outer.cancelled.wait(self.interact_delay)
-            body = {"transcript": "hello", "text": "hi there", "model": "m"}
+            body = {"transcript": "hello", "text": "hi there", "model": "m",
+                    **self.interact_extra}
             if self.interact_audio_b64 is not None:
                 body["audio_wav_base64"] = self.interact_audio_b64
             return 200, body, None
@@ -143,6 +159,19 @@ class FakeBMOServer:
             return 200, None, tiny_wav()
         if p == "/v1/chat/completions":
             return 200, {"choices": [{"message": {"content": "chat reply"}}]}, None
+        if p == "/v1/bmo/memories" and self.memory_routes:
+            if m == "GET":
+                return 200, {"memories": list(self.memories)}, None
+            if m == "DELETE":
+                n, self.memories = len(self.memories), []
+                return 200, {"forgotten": n}, None
+        mem = re.fullmatch(r"/v1/bmo/memories/(\d+)", p)
+        if mem and m == "DELETE" and self.memory_routes:
+            keep = [x for x in self.memories if x["id"] != int(mem.group(1))]
+            if len(keep) == len(self.memories):
+                return 404, {"error": "unknown id"}, None
+            self.memories = keep
+            return 200, {"deleted": True}, None
         mm = re.fullmatch(r"/v1/requests/([^/]+)/cancel", p)
         if mm and m == "POST":
             if 200 <= self.cancel_status < 300:

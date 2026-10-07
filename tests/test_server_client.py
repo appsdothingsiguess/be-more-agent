@@ -1,4 +1,5 @@
 import base64
+import json
 import logging
 import threading
 import uuid
@@ -158,3 +159,36 @@ def test_token_not_leaked(client, caplog):
     client.cancel("abc")
     assert TOKEN not in repr(client)
     assert TOKEN not in caplog.text
+
+
+def test_interact_history_and_memory_fields(client, server):
+    hist = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+    client.interact(text="yo", history=hist, memory=True)
+    vals = server.requests[-1]["values"]
+    assert json.loads(vals["history"]) == hist and vals["memory"] == "on"
+    client.interact(text="yo", history=[], memory=False)
+    vals = server.requests[-1]["values"]
+    assert "history" not in vals and vals["memory"] == "off"
+    client.interact(text="yo")
+    assert set(server.requests[-1]["values"]) == {"speak", "text"}
+
+
+def test_memory_routes(client, server):
+    assert client.list_memories(limit=5, offset=2)[0]["content"] == "likes tea"
+    assert server.requests[-1]["query"] == "limit=5&offset=2"
+    assert client.delete_memory(1) is True
+    assert client.delete_memory(1) is None
+    assert client.forget_memories() == 0
+
+
+def test_memory_routes_404_means_unavailable(client, server):
+    server.memory_routes = False
+    assert client.list_memories() is None
+    assert client.forget_memories() is None
+    assert client.delete_memory(3) is None
+
+
+def test_memory_routes_other_errors_raise(client, server):
+    server.auth_mode_401 = True
+    with pytest.raises(AuthError):
+        client.list_memories()

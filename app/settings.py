@@ -61,6 +61,7 @@ SETTINGS: dict[str, Callable[[Any], Any]] = {
     "camera.vision_mode": _vision,
     "sounds.enabled": _bool,
     "microphone.gain_db": _gain,
+    "memory.enabled": _bool,
 }
 
 

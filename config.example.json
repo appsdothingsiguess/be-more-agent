@@ -62,5 +62,11 @@
 
   "wake_word": {
     "enabled": false
+  },
+
+  "memory": {
+    "enabled": true,
+    "max_messages": 10,
+    "max_chars": 6000
   }
 }
