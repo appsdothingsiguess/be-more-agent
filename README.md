@@ -18,7 +18,7 @@ Raspberry Pi 4 (bmo-pi)                          Home AI server
                                                  +-----------------------------+
 ```
 
-Removed compared to upstream: Ollama, whisper.cpp, Piper and its voices, Moondream, DuckDuckGo search, local chat memory, and `sounddevice`/`numpy`/`scipy`. The monolithic `agent.py` is now the `app/` package. Faces, sounds, the state machine concept and OpenWakeWord (optional, off by default) are kept. See `PLAN.md` for the full refactor plan.
+Removed compared to upstream: Ollama, whisper.cpp, Piper and its voices, Moondream, DuckDuckGo search, the local-model chat memory, and `sounddevice`/`numpy`/`scipy`. The monolithic `agent.py` is now the `app/` package. Faces, sounds, the state machine concept and OpenWakeWord (optional, off by default) are kept. See `PLAN.md` for the full refactor plan.
 
 ## Hardware
 
@@ -147,6 +147,15 @@ Every failure has a short message and a next step, for example "I can't reach my
 
 The clips are generated with the server voice: `./venv/bin/python tools/make_error_clips.py [--force]` after editing `app/notify.py`.
 
+## Conversation memory
+
+BMO remembers the last few exchanges. After every successful turn the Pi saves the user's words and BMO's reply (text only, never images) to `runtime/memory.json`, keeping the newest 10 messages (`memory.max_messages`, within `memory.max_chars`). Every turn sends them to the server as the `history` form field, so "what did I just ask?" works, also after a restart. Interrupted and failed turns are not saved.
+
+* **Long-term memory** (facts that outlive the last 10 messages) lives on the server, which recalls and stores them itself. The Pi only lists, deletes and wipes them through `/v1/bmo/memories`. Until the server has those routes the page says it is not set up yet, and nothing breaks.
+* **Forgetting.** Typing "forget everything" or "reset memory" (also with "BMO" first or "please" last) clears the Pi's history and asks the server to wipe long-term memory, without sending the phrase to the model. Saying it is handled by the server, which answers with `memory_reset` so the Pi clears its history too. The web page has a "Forget everything" button.
+* **Off switch.** `memory.enabled` (web page toggle) stops sending history and tells the server not to recall or store anything.
+* The server side is specified in `docs/bmo-memory-plan.md` in the server repo (`~/BMO/.worktrees/bmo-dual-gpu` on `3070server`).
+
 ## Web page
 
 While BMO runs (`--headless` or `--gui`), it serves a page on port 8080: `http://<pi-address>:8080` (this Pi: `http://192.168.0.218:8080`) from any device on the home network. It offers:
@@ -155,6 +164,7 @@ While BMO runs (`--headless` or `--gui`), it serves a page on port 8080: `http:/
 * live state, errors and "waiting for the server" notices
 * settings: volume, mute (text only), camera mode, sound effects, mic boost
 * a server panel: reachable, ready, mode, queue, last error
+* a Memory section: on/off toggle, this conversation's message count, the facts BMO remembers long-term (each can be deleted), and a "Forget everything" button
 
 **PIN.** The first start creates a 6-digit PIN in `~/.config/bmo/web_pin` (mode 600). Read it with `cat ~/.config/bmo/web_pin`; delete the file to get a new one. After 5 wrong PINs, that device is locked out for 5 minutes.
 
@@ -166,7 +176,7 @@ Mic and speaker `device: "auto"` looks through `/proc/asound/cards` for a card w
 
 ## Server API
 
-Endpoints used: `GET /v1/status`, `GET /v1/models`, `POST /v1/bmo/reservation`, `DELETE /v1/bmo/reservation`, `POST /v1/bmo/interact` (fields `audio`, `image`, `speak`), `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`, `POST /v1/chat/completions`, `POST /v1/requests/{id}/cancel`. Every request carries the credential and a unique `X-Request-ID`.
+Endpoints used: `GET /v1/status`, `GET /v1/models`, `POST /v1/bmo/reservation`, `DELETE /v1/bmo/reservation`, `POST /v1/bmo/interact` (fields `audio`, `image`, `text`, `speak`, plus `history` and `memory` when conversation memory is on), `GET`/`DELETE /v1/bmo/memories` and `DELETE /v1/bmo/memories/{id}` (long-term memory; a 404 means the server does not have them yet), `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`, `POST /v1/chat/completions`, `POST /v1/requests/{id}/cancel`. Every request carries the credential and a unique `X-Request-ID`.
 
 **Reservation.** Before inference the client reserves the GPU. A `200` means ready. A `202` means the server is restoring, so the client polls `/v1/status` until `bmo_ready`, then POSTs again and requires `200`. The reservation lasts 300 s and is renewed on use (the client renews after 240 s idle). It is released with `DELETE` on exit or SIGTERM.
 

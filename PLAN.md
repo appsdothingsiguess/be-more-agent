@@ -34,7 +34,7 @@ behaviour and does not invent replacements.
 - Piper binary, Piper voices, custom BMO `.onnx` voice download.
 - Moondream local vision.
 - DuckDuckGo web search (`duckduckgo-search`).
-- Local `memory.json` chat history. The server owns persona and memory, and the Pi keeps only ephemeral session state.
+- Upstream's local `memory.json` chat history (Ollama-based). The server owns persona and long-term memory. Later the Pi gained a small `runtime/memory.json` of the last 10 text messages, which it sends as `history` on each turn (see README, Conversation memory).
 - `sounddevice` / PortAudio / `numpy` / `scipy`. Audio uses the proven `arecord`/`ffmpeg`/`aplay` path.
 - Upstream `config.json` (Ollama models / prompt) → replaced by `config.example.json`.
 
