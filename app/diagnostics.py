@@ -164,7 +164,9 @@ def run_diagnostics(cfg, *, components=None, input_fn=input, out=print,
 
     def s_transcribe():
         audio = need("audio", "recording")
-        return f"{client.transcribe(audio)!r}"
+        text = client.transcribe(audio)
+        ctx["transcript"] = text
+        return f"{text!r}"
 
     def s_vision():
         image = need("image", "camera image")
@@ -176,7 +178,11 @@ def run_diagnostics(cfg, *, components=None, input_fn=input, out=print,
 
     def s_full():
         audio = need("audio", "recording")
-        r = client.interact(audio_path=audio, image_path=ctx.get("image"), speak=True)
+        # A silent room transcribes to "" and the server rejects audio with no words
+        # (422 "Provide text or audio"); add a typed question so the step still
+        # exercises audio + image + text together.
+        text = None if ctx.get("transcript", "").strip() else "What do you see?"
+        r = client.interact(audio_path=audio, image_path=ctx.get("image"), text=text, speak=True)
         out(f"      transcript: {r.transcript!r}")
         out(f"      text: {r.text!r}")
         detail = f"{len(r.text)} chars"

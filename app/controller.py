@@ -21,8 +21,8 @@ from app.config import Config
 from app.hardware.camera import CameraError
 from app.hardware.input import Action
 from app.notify import ERRORS, NOTICES, SERVER_CODES, SOFT, clip_path
-from app.server.errors import (AuthError, BMOError, RequestCancelled, ReservationTimeout,
-                               ServerBusy, ServerUnavailable)
+from app.server.errors import (AuthError, BadResponse, BMOError, RequestCancelled,
+                               ReservationTimeout, ServerBusy, ServerUnavailable)
 from app.ui.states import BotState
 
 log = logging.getLogger(__name__)
@@ -406,6 +406,13 @@ class InteractionController:
             log.warning("Server busy: %s", e.code)
             self.notify(SERVER_CODES.get(e.code, "server_switching"), gen=gen,
                         server_message=e.display_message)
+        except BadResponse as e:
+            if e.status == 422 and "text or audio" in e.detail:
+                # Whisper heard no words in the recording.
+                self.notify("nothing_heard", gen=gen)
+            else:
+                log.error("Bad server response: %s %s", e, e.detail)
+                self.notify("unknown", gen=gen)
         except ReservationTimeout as e:
             log.error("Readiness timeout: %s", e)
             self.notify("gpu_wait_timeout", gen=gen)

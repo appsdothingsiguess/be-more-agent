@@ -359,6 +359,18 @@ def test_nothing_heard_is_soft(rig):
     assert ("play", "nothing_heard.wav") in rig.log
 
 
+def test_server_heard_no_words_is_nothing_heard(rig):
+    from app.server.errors import BadResponse
+    rig.spk.sounds_dir = SOUNDS
+    rig.client.error = BadResponse("unexpected status 422", status=422,
+                                   detail='{"detail":"Provide text or audio"}')
+    rig.ctl.handle_action(Action.START)
+    rig.ctl.handle_action(Action.START)
+    _join_turns()
+    assert rig.ctl.state is BotState.IDLE
+    assert ("play", "nothing_heard.wav") in rig.log
+
+
 def test_waiting_notice_once_per_turn(rig):
     events = []
     rig.ctl.subscribe(events.append)
