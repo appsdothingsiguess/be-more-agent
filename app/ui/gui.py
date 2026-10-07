@@ -54,10 +54,16 @@ class TkUI:
         self.root.title("BMO")
         self.root.configure(bg="black")
         if cfg.fullscreen:
+            # -fullscreen needs a window manager; bare X (Pi OS Lite kiosk) has none, so
+            # also cover the whole screen ourselves and skip WM decorations.
+            self.w, self.h = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+            self.root.overrideredirect(True)
+            self.root.geometry(f"{self.w}x{self.h}+0+0")
             self.root.attributes("-fullscreen", True)
+            self.root.focus_force()
         else:
-            self.root.geometry(f"{cfg.width}x{cfg.height}")
-        self.w, self.h = cfg.width, cfg.height
+            self.w, self.h = cfg.width, cfg.height
+            self.root.geometry(f"{self.w}x{self.h}")
 
         self.background_label = tk.Label(self.root, bg="black")
         self.background_label.place(x=0, y=0, relwidth=1, relheight=1)

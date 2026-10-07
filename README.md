@@ -22,7 +22,7 @@ Removed compared to upstream: Ollama, whisper.cpp, Piper and its voices, Moondre
 
 ## Hardware
 
-* Raspberry Pi 4, Raspberry Pi OS Lite 64-bit (no display server yet)
+* Raspberry Pi 4, Raspberry Pi OS Lite 64-bit (a bare X server is added by `tools/setup_display.sh`)
 * Camera Module v2 (IMX219), captured with `rpicam-still`
 * USB microphone: C-Media "USB PnP Sound Device"
 * USB speaker: "UACDemoV1.0"
@@ -95,7 +95,7 @@ Environment overrides: `BMO_SERVER_URL` (or `BMO_URL`), `BMO_MIC_DEVICE`, `BMO_S
 ./venv/bin/python -m app --gui            # Tk face GUI (needs X/Wayland)
 ```
 
-Other flags: `--config FILE`, `--no-speak` (with `--text`: print only), `-v`. `./start_agent.sh [args]` runs `python -m app` from the venv (set `BMO_VENV` to use another one). Pi OS Lite has no display server yet, so use `--headless` until a kiosk/X setup exists. With no mode flag, the GUI is used if a display is available and headless otherwise.
+Other flags: `--config FILE`, `--no-speak` (with `--text`: print only), `-v`. `./start_agent.sh [args]` runs `python -m app` from the venv (set `BMO_VENV` to use another one). On Pi OS Lite, `tools/setup_display.sh` installs a bare X server (no desktop) and switches the service to `--gui` on the panel; `tools/setup_display.sh --remove` goes back to headless. With no mode flag, the GUI is used if a display is available and headless otherwise.
 
 Headless console commands:
 
@@ -191,7 +191,7 @@ Unit tests use a fake server. `tools/bmo_test.py` is the reference acceptance te
 * **Mic too quiet:** raise `microphone.gain_db` (or `BMO_MIC_GAIN_DB`), and check capture level and AGC with `amixer -c <card> contents` / `alsamixer`. The app sets capture to 100% and enables AGC by default.
 * **401 Unauthorized:** the wrong credential. Use the physical BMO credential, not the general one, and check which file is picked up (see the Credential section).
 * **202 / long wait on first request:** the server is restoring the BMO model. The client waits (up to `readiness_timeout`, 300 s) and retries on its own.
-* **No display:** Pi OS Lite has no X server, so `--gui` exits with "No display available". Use `--headless`.
+* **No display:** without X, `--gui` exits with "No display available". Run `tools/setup_display.sh`, or use `--headless`. The DSI panel needs `dtoverlay=vc4-kms-dsi-7inch` in `/boot/firmware/config.txt`.
 * **Shutdown noise:** `alsa_snd_pcm_mmap_begin` messages on Ctrl+C are harmless.
 
 ## Customizing the character
