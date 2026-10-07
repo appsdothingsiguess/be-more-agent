@@ -1,8 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$BASE_DIR"
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
-source venv/bin/activate
-exec python agent.py
+if [ -n "${BMO_VENV:-}" ]; then
+    PY="$BMO_VENV/bin/python"
+else
+    PY="./venv/bin/python"
+fi
+
+exec "$PY" -m app "$@"
