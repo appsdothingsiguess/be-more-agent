@@ -58,3 +58,6 @@ runtime/
 # Character assets are part of the repo
 !faces/**/*.png
 !sounds/**/*.wav
+
+# Claude Code agent worktrees
+.claude/
