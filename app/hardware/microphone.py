@@ -80,7 +80,9 @@ class Microphone:
         try:
             if proc.stderr:
                 err = proc.stderr.read()
-                if err and proc.returncode not in (0, -signal.SIGINT):
+                # SIGINT is our normal push-to-talk stop; arecord reports it on stderr.
+                if (err and proc.returncode not in (0, -signal.SIGINT)
+                        and b"Aborted by signal" not in err):
                     log.warning("arecord: %s", err.decode(errors="replace")[-300:])
                 proc.stderr.close()
         except Exception:
