@@ -31,14 +31,15 @@
     "width": 640,
     "height": 480,
     "rotation": 0,
-    "vision_mode": "always"
+    "vision_mode": "manual"
   },
 
   "ui": {
     "enabled": true,
     "width": 800,
     "height": 480,
-    "fullscreen": true
+    "fullscreen": true,
+    "text_only": false
   },
 
   "sounds": {
@@ -51,6 +52,12 @@
   "input": {
     "evdev_enabled": true,
     "evdev_device": "auto"
+  },
+
+  "web": {
+    "enabled": true,
+    "port": 8080,
+    "pin_file": "~/.config/bmo/web_pin"
   },
 
   "wake_word": {

@@ -29,6 +29,9 @@ class Reservation:
         self._lock = threading.Lock()
         self._state = ReservationState.RELEASED
         self.last_renewed: float | None = None
+        # Called with each /v1/status dict while waiting for bmo_ready (mode,
+        # queue counts...), so the UI can say why BMO is waiting.
+        self.on_wait = None
 
     @property
     def state(self) -> ReservationState:
@@ -61,8 +64,14 @@ class Reservation:
 
     def _wait_ready(self, deadline: float) -> None:
         while True:
-            if self._client.status().get("bmo_ready"):
+            status = self._client.status()
+            if status.get("bmo_ready"):
                 return
+            if self.on_wait is not None:
+                try:
+                    self.on_wait(status)
+                except Exception:
+                    log.exception("on_wait callback failed")
             if self._clock() >= deadline:
                 raise ReservationTimeout("BMO workers not ready before timeout")
             self._sleep(self._cfg.readiness_poll_seconds)

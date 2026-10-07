@@ -24,7 +24,7 @@ def test_mapper_default_keymap():
     m = KeyMapper(InputConfig().keymap)
     assert m.action_for("Return") == Action.START
     assert m.action_for("KEY_ENTER") == Action.START
-    assert m.action_for("Escape") == Action.QUIT
+    assert m.action_for("Escape") is None  # Esc no longer quits (stuck service)
     assert m.action_for("Up") == Action.UP
     assert m.action_for("KEY_Z") == Action.A
     assert m.action_for("f9") is None
@@ -52,11 +52,11 @@ def test_reader_fifo(tmp_path):
     r = EvdevReader([fifo, tmp_path / "nope"], KeyMapper(InputConfig().keymap), got.append)
     r.start()
     wfd = os.open(fifo, os.O_WRONLY)
-    # key-down ENTER, up, repeat (ignored), key-down ESC
-    os.write(wfd, ev(28, 1) + ev(28, 0) + ev(28, 2) + ev(1, 1))
+    # key-down ENTER, up, repeat (ignored), key-down B
+    os.write(wfd, ev(28, 1) + ev(28, 0) + ev(28, 2) + ev(48, 1))
     deadline = time.time() + 3
     while len(got) < 2 and time.time() < deadline:
         time.sleep(0.05)
     r.stop()
     os.close(wfd)
-    assert got == [Action.START, Action.QUIT]
+    assert got == [Action.START, Action.B]

@@ -136,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     try:
         cfg = load_config(args.config)
+        from app.settings import load_settings
+        load_settings(cfg)  # changes made from the web page
         if args.self_test:
             from app.diagnostics import run_diagnostics
             return run_diagnostics(cfg)

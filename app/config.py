@@ -71,7 +71,8 @@ class CameraConfig:
     width: int = 640
     height: int = 480
     rotation: int = 0
-    vision_mode: str = "always"
+    # "manual" = B button arms the camera for one turn (it faces a wall at the moment).
+    vision_mode: str = "manual"
     timeout_seconds: float = 30.0
 
 
@@ -82,6 +83,8 @@ class UIConfig:
     height: int = 480
     fullscreen: bool = True
     faces_dir: str = "faces"
+    # Mute: replies and errors are text only (screen / web page); the speaker stays silent.
+    text_only: bool = False
 
 
 @dataclass
@@ -109,13 +112,20 @@ class InputConfig:
         "z": "a",
         "b": "b",
         "x": "b",
-        "escape": "quit",
-        "esc": "quit",
     })
     # Read HID keyboards (e.g. the Feather) directly from /dev/input when headless.
     evdev_enabled: bool = True
     # "auto" = every /dev/input/by-id/*-event-kbd; or an explicit event device path.
     evdev_device: str = "auto"
+
+
+@dataclass
+class WebConfig:
+    # Local web page (text chat, settings, status), LAN only, PIN protected.
+    enabled: bool = True
+    host: str = "0.0.0.0"
+    port: int = 8080
+    pin_file: str = "~/.config/bmo/web_pin"
 
 
 @dataclass
@@ -144,6 +154,7 @@ class Config:
     ui: UIConfig = field(default_factory=UIConfig)
     sounds: SoundsConfig = field(default_factory=SoundsConfig)
     input: InputConfig = field(default_factory=InputConfig)
+    web: WebConfig = field(default_factory=WebConfig)
     wake_word: WakeWordConfig = field(default_factory=WakeWordConfig)
 
     def path(self, value: str) -> Path:

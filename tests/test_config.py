@@ -21,7 +21,7 @@ def test_defaults_match_verified_hardware(tmp_path):
     assert cfg.microphone.upload_rate == 16000
     assert cfg.microphone.gain_db == 18
     assert cfg.speaker.fallback_device == "plughw:2,0"
-    assert (cfg.camera.width, cfg.camera.height, cfg.camera.vision_mode) == (640, 480, "always")
+    assert (cfg.camera.width, cfg.camera.height, cfg.camera.vision_mode) == (640, 480, "manual")
     assert cfg.wake_word.enabled is False
 
 

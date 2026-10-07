@@ -28,3 +28,17 @@ class BadResponse(BMOError):
 
 class ReservationTimeout(BMOError):
     pass
+
+
+class ServerBusy(BMOError):
+    """The scheduler refused work for now: {"status": "unavailable", "code", "display_message"}.
+
+    Codes include large_model_session_active, mode_transition, bmo_restoring,
+    gpu_unavailable, bmo_busy_dual, bmo_reserved and transition_failed.
+    """
+
+    def __init__(self, code: str, display_message: str = "", status: int | None = None):
+        super().__init__(f"server busy: {code}")
+        self.code = code
+        self.display_message = display_message
+        self.status = status

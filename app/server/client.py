@@ -18,6 +18,7 @@ from app.server.errors import (
     AuthError,
     BadResponse,
     RequestCancelled,
+    ServerBusy,
     ServerUnavailable,
 )
 
@@ -75,6 +76,12 @@ class BMOClient:
         if 200 <= code < 300:
             return
         body = (r.text or "")[:200]
+        unavailable = BMOClient._unavailable(r)
+        if unavailable is not None:
+            ucode, message = unavailable
+            if "cancel" in ucode:
+                raise RequestCancelled(f"request cancelled ({code})")
+            raise ServerBusy(ucode, message, status=code)
         if code in (401, 403):
             raise AuthError(f"authentication failed ({code})")
         if code == 499 or (code == 409 and "cancel" in body.lower()):
@@ -82,6 +89,19 @@ class BMOClient:
         if code >= 500:
             raise ServerUnavailable(f"server error {code}")
         raise BadResponse(f"unexpected status {code}", status=code, detail=body)
+
+    @staticmethod
+    def _unavailable(r: requests.Response) -> tuple[str, str] | None:
+        """(code, display_message) for the scheduler's machine-readable refusals."""
+        if "json" not in r.headers.get("content-type", ""):
+            return None
+        try:
+            body = r.json()
+        except ValueError:
+            return None
+        if isinstance(body, dict) and body.get("status") == "unavailable" and body.get("code"):
+            return str(body["code"]), str(body.get("display_message") or "")
+        return None
 
     def _request(
         self,

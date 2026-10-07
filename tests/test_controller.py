@@ -142,6 +142,7 @@ class FakeCamera:
 def rig(tmp_path):
     log = Log()
     cfg = Config(runtime_dir=str(tmp_path / "runtime"))
+    cfg.camera.vision_mode = "always"
     audio = tmp_path / "up.wav"
     audio.write_bytes(WAV)
     img = tmp_path / "cam.jpg"

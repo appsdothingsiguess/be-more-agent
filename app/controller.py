@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
+from collections import deque
 from pathlib import Path
+from typing import Any, Callable
 
 from app.config import Config
 from app.hardware.camera import CameraError
@@ -46,6 +49,10 @@ class InteractionController:
         self._closed = False
         self.last_transcript: str | None = None
         self.last_reply: str | None = None
+        # Event feed for the web page: dicts with "type" in state/text/error.
+        self._subscribers: list[Callable[[dict], None]] = []
+        self.history: deque[dict] = deque(maxlen=50)  # recent text/error events
+        self._status_cache: tuple[float, dict] | None = None
 
         cfg.runtime_path.mkdir(parents=True, exist_ok=True)
 
@@ -70,7 +77,71 @@ class InteractionController:
                 self._idle.clear()
         log.info("state -> %s %s", state.value, message)
         self.ui.set_state(state, message)
+        self._emit({"type": "state", "state": state.value, "message": message})
         return True
+
+    # ----------------------------------------------------------------- events
+    def subscribe(self, fn: Callable[[dict], None]) -> Callable[[], None]:
+        """Receive every event dict; returns an unsubscribe function."""
+        with self._lock:
+            self._subscribers.append(fn)
+
+        def unsubscribe() -> None:
+            with self._lock:
+                if fn in self._subscribers:
+                    self._subscribers.remove(fn)
+        return unsubscribe
+
+    def _emit(self, event: dict) -> None:
+        event = {"time": time.time(), **event}
+        if event["type"] in ("text", "error"):
+            self.history.append(event)
+        with self._lock:
+            subscribers = list(self._subscribers)
+        for fn in subscribers:
+            try:
+                fn(event)
+            except Exception:
+                log.exception("Event subscriber failed")
+
+    def _show(self, text: str, who: str = "bmo") -> None:
+        self.ui.show_text(text, who)
+        self._emit({"type": "text", "who": who, "text": text})
+
+    # --------------------------------------------------------------- settings
+    def apply_setting(self, key: str, value: Any) -> Any:
+        """Validate, apply live and persist one user setting (see app/settings.py)."""
+        from app.settings import save_settings, set_setting
+        value = set_setting(self.cfg, key, value)
+        if key == "speaker.volume":
+            try:
+                self.speaker.configure()
+            except Exception as e:
+                log.warning("Volume change failed: %s", e)
+        elif key == "camera.vision_mode":
+            self._vision_armed = False
+        elif key == "ui.text_only" and value:
+            self.speaker.stop()
+        save_settings(self.cfg)
+        return value
+
+    def server_status(self, max_age: float = 5.0) -> dict:
+        """Small /v1/status summary for display, cached for max_age seconds."""
+        now = time.monotonic()
+        cached = self._status_cache
+        if cached is not None and now - cached[0] < max_age:
+            return cached[1]
+        try:
+            raw = self.client.status()
+            summary = {"reachable": True, "bmo_ready": bool(raw.get("bmo_ready")),
+                       "mode": raw.get("scheduling_state") or raw.get("state") or raw.get("mode"),
+                       "active_requests": raw.get("active_requests"),
+                       "queued_requests": raw.get("queued_requests"),
+                       "last_error": raw.get("last_error") or raw.get("failure_reason")}
+        except BMOError as e:
+            summary = {"reachable": False, "error": type(e).__name__}
+        self._status_cache = (now, summary)
+        return summary
 
     def _stale(self, gen: int) -> bool:
         return gen != self._generation
@@ -96,7 +167,7 @@ class InteractionController:
             self._set_state(BotState.ERROR, f"Server unreachable: {e}")
             return
         self._set_state(BotState.IDLE, "Press Start to talk")
-        if self.cfg.sounds.enabled and self.cfg.sounds.greeting:
+        if not self.cfg.ui.text_only and self.cfg.sounds.enabled and self.cfg.sounds.greeting:
             self.speaker.play_effect("greeting")
 
     # ---------------------------------------------------------------- actions
@@ -119,12 +190,13 @@ class InteractionController:
         elif action is Action.B:
             if self.cfg.camera.vision_mode == "manual":
                 self._vision_armed = not self._vision_armed
-                self.ui.show_text("Camera armed for next turn" if self._vision_armed
-                                  else "Camera disarmed", "bmo")
+                self._show("Camera armed for next turn" if self._vision_armed
+                           else "Camera disarmed", "bmo")
         elif action is Action.QUIT:
             self.shutdown()
 
-    def submit_text(self, text: str) -> None:
+    def submit_text(self, text: str, speak: bool | None = None) -> None:
+        """Send typed text. speak=None follows the mute setting (ui.text_only)."""
         text = text.strip()
         if not text or self._closed:
             return
@@ -134,7 +206,7 @@ class InteractionController:
             self._abort_listening()
         with self._lock:
             gen = self._generation
-        self._spawn(gen, text=text)
+        self._spawn(gen, text=text, speak=speak)
 
     # -------------------------------------------------------------- listening
     def _start_listening(self) -> None:
@@ -200,8 +272,10 @@ class InteractionController:
         self._set_state(BotState.IDLE, "Interrupted")
 
     # ------------------------------------------------------------------ turns
-    def _spawn(self, gen: int, *, record: bool = False, text: str | None = None) -> None:
-        threading.Thread(target=self._run_turn, args=(gen,), kwargs={"record": record, "text": text},
+    def _spawn(self, gen: int, *, record: bool = False, text: str | None = None,
+               speak: bool | None = None) -> None:
+        threading.Thread(target=self._run_turn, args=(gen,),
+                         kwargs={"record": record, "text": text, "speak": speak},
                          name=f"bmo-turn-{gen}", daemon=True).start()
 
     def _want_image(self) -> bool:
@@ -213,7 +287,10 @@ class InteractionController:
             return armed
         return True
 
-    def _run_turn(self, gen: int, *, record: bool = False, text: str | None = None) -> None:
+    def _run_turn(self, gen: int, *, record: bool = False, text: str | None = None,
+                  speak: bool | None = None) -> None:
+        if speak is None:
+            speak = not self.cfg.ui.text_only
         try:
             audio = None
             if record:
@@ -236,7 +313,7 @@ class InteractionController:
 
             if not self._set_state(BotState.THINKING, "Thinking...", gen):
                 return
-            if self.cfg.sounds.enabled and self.cfg.sounds.ack:
+            if speak and self.cfg.sounds.enabled and self.cfg.sounds.ack:
                 self.speaker.play_effect("ack")
 
             with self._lock:
@@ -254,7 +331,7 @@ class InteractionController:
                 self._active_request_id = request_id
             try:
                 result = self.client.interact(text=text, audio_path=audio, image_path=image,
-                                              speak=True, request_id=request_id)
+                                              speak=speak, request_id=request_id)
             finally:
                 with self._lock:
                     if self._active_request_id == request_id:
@@ -267,10 +344,10 @@ class InteractionController:
             self.last_transcript = result.transcript or text
             self.last_reply = result.text
             if self.last_transcript:
-                self.ui.show_text(self.last_transcript, "user")
-            self.ui.show_text(result.text, "bmo")
+                self._show(self.last_transcript, "user")
+            self._show(result.text, "bmo")
 
-            if result.audio_wav:
+            if speak and result.audio_wav:
                 reply = Path(self.cfg.runtime_path) / f"reply-{gen}.wav"
                 reply.write_bytes(result.audio_wav)
                 if not self._set_state(BotState.SPEAKING, "", gen):
