@@ -13,14 +13,31 @@ log = logging.getLogger(__name__)
 
 class Speaker:
     def __init__(self, cfg: SpeakerConfig, sounds_dir: Path,
-                 popen=subprocess.Popen, cards=None):
+                 popen=subprocess.Popen, cards=None, run=subprocess.run):
         self.cfg = cfg
         self.sounds_dir = Path(sounds_dir)
         self._popen = popen
+        self._run = run
         self.resolved = alsa.resolve_device(cfg.device, cfg.match, cfg.fallback_device, cards)
+        self.card = cfg.alsa_card if cfg.alsa_card is not None else self.resolved.card
         self._lock = threading.Lock()
         self._proc = None
         self._gen = 0  # bumped by every stop()/new play to invalidate waiters
+
+    def configure(self) -> None:
+        """Set playback volume (the UACDemo speaker boots at 30%). Failures only warn."""
+        if not self.cfg.set_volume:
+            return
+        if self.card is None:
+            log.warning("No ALSA card known for speaker; skipping volume setup")
+            return
+        cmd = ["amixer", "-c", str(self.card), "sset", self.cfg.volume_control, self.cfg.volume, "unmute"]
+        try:
+            r = self._run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                log.warning("amixer failed (%s): %s", " ".join(cmd), (r.stderr or "").strip())
+        except Exception as e:
+            log.warning("amixer error (%s): %s", " ".join(cmd), e)
 
     @property
     def is_playing(self) -> bool:

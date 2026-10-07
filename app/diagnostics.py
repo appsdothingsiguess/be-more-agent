@@ -113,6 +113,8 @@ def run_diagnostics(cfg, *, components=None, input_fn=input, out=print,
 
     def s_speaker():
         audio = need("audio", "recording")
+        if hasattr(speaker, "configure"):
+            speaker.configure()
         if not play(audio):
             raise RuntimeError("playback failed")
         if skip_interactive:

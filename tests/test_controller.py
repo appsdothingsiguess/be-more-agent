@@ -116,6 +116,9 @@ class FakeSpeaker:
             return False
         return True
 
+    def configure(self):
+        self.log.append(("speaker_configure",))
+
     def play_effect(self, category):
         self.log.append(("effect", category))
 
@@ -154,6 +157,10 @@ def rig(tmp_path):
 
 def names(log):
     return [e[0] for e in log]
+
+
+def test_start_configures_mic_and_speaker(rig):
+    assert ("mic_configure",) in rig.log and ("speaker_configure",) in rig.log
 
 
 def test_full_turn_happy_path(rig):

@@ -120,7 +120,9 @@ def run_text(cfg, message: str, speak: bool) -> int:
             out.mkdir(parents=True, exist_ok=True)
             reply = out / "reply-text.wav"
             reply.write_bytes(result.audio_wav)
-            Speaker(cfg.speaker, cfg.path(cfg.sounds.dir)).play(reply, block=True)
+            speaker = Speaker(cfg.speaker, cfg.path(cfg.sounds.dir))
+            speaker.configure()
+            speaker.play(reply, block=True)
     finally:
         reservation.release()
     return 0

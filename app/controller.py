@@ -87,6 +87,10 @@ class InteractionController:
         except Exception as e:  # mixer problems never block startup
             log.warning("Microphone setup failed: %s", e)
         try:
+            self.speaker.configure()
+        except Exception as e:
+            log.warning("Speaker setup failed: %s", e)
+        try:
             self.client.health()
         except BMOError as e:
             self._set_state(BotState.ERROR, f"Server unreachable: {e}")

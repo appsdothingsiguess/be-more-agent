@@ -19,7 +19,11 @@
   "speaker": {
     "device": "auto",
     "match": "UACDemoV1.0",
-    "fallback_device": "plughw:2,0"
+    "fallback_device": "plughw:2,0",
+    "alsa_card": null,
+    "set_volume": true,
+    "volume_control": "PCM",
+    "volume": "100%"
   },
 
   "camera": {

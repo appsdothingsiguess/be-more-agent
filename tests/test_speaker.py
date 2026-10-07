@@ -54,3 +54,20 @@ def test_effects(tmp_path):
     assert sp.random_sound("ack") == d / "a.wav"
     assert sp.play_effect("ack")
     sp.stop()
+
+
+def test_configure_sets_volume_to_100(tmp_path):
+    calls = []
+    run = lambda argv, **kw: calls.append(argv) or subprocess.CompletedProcess(argv, 0, "", "")
+    Speaker(SpeakerConfig(), tmp_path, cards=CARDS, run=run).configure()
+    assert calls == [["amixer", "-c", "UACDemoV10", "sset", "PCM", "100%", "unmute"]]
+
+
+def test_configure_tolerates_failure_and_can_be_disabled(tmp_path):
+    def boom(argv, **kw):
+        raise OSError("no amixer")
+    Speaker(SpeakerConfig(), tmp_path, cards=CARDS, run=boom).configure()  # no raise
+    calls = []
+    Speaker(SpeakerConfig(set_volume=False), tmp_path, cards=CARDS,
+            run=lambda a, **k: calls.append(a)).configure()
+    assert calls == []

@@ -58,6 +58,11 @@ class SpeakerConfig:
     device: str = "auto"
     match: str = "UACDemoV1.0"
     fallback_device: str = "plughw:2,0"
+    # amixer card for volume; None = derive from the resolved device.
+    alsa_card: str | int | None = None
+    set_volume: bool = True
+    volume_control: str = "PCM"
+    volume: str = "100%"
 
 
 @dataclass
