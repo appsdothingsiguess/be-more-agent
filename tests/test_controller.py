@@ -38,6 +38,7 @@ class FakeClient:
         self.cancelled = threading.Event()
         self.calls = []
         self.error = None
+        self.raw = {}
 
     def health(self):
         return {"ok": True}
@@ -55,7 +56,12 @@ class FakeClient:
         if self.error:
             raise self.error
         return SimpleNamespace(transcript="hi bmo", text=f"reply to {kw['request_id']}",
-                               audio_wav=WAV, request_id=kw["request_id"])
+                               audio_wav=WAV, request_id=kw["request_id"],
+                               raw=self.raw)
+
+    def forget_memories(self):
+        self.log.append(("forget_memories",))
+        return 3
 
     def cancel(self, request_id):
         self.log.append(("cancel", request_id))
@@ -425,3 +431,87 @@ def _join_turns():
     for t in threading.enumerate():
         if t.name.startswith("bmo-turn"):
             t.join(5)
+
+
+def run_text(rig, text="hello"):
+    rig.ctl.submit_text(text)
+    assert rig.client.entered.wait(5)
+    assert rig.ctl.wait_idle(5)
+    rig.client.entered.clear()
+
+
+def test_history_sent_and_exchange_stored(rig):
+    run_text(rig, "first")
+    assert rig.client.calls[0]["history"] == [] and rig.client.calls[0]["memory"] is True
+    assert rig.ctl.conversation() == [{"role": "user", "content": "hi bmo"},
+                                      {"role": "assistant", "content": "reply to req-1"}]
+    run_text(rig, "second")
+    assert len(rig.client.calls[1]["history"]) == 2
+    assert len(rig.ctl.conversation()) == 4
+
+
+def test_memory_disabled_sends_off_and_stores_nothing(rig):
+    rig.cfg.memory.enabled = False
+    run_text(rig)
+    call = rig.client.calls[0]
+    assert call["memory"] is False and "history" not in call
+    assert rig.ctl.conversation() == []
+
+
+def test_memory_reset_clears_local(rig):
+    run_text(rig)
+    assert len(rig.ctl.conversation()) == 2
+    rig.client.raw = {"memory_reset": True}
+    run_text(rig)
+    assert rig.ctl.conversation() == []
+
+
+def test_typed_forget_never_calls_interact(rig):
+    run_text(rig)
+    rig.ctl.submit_text("BMO, forget everything!")
+    for _ in range(100):
+        if ("forget_memories",) in rig.log:
+            break
+        threading.Event().wait(0.05)
+    assert ("forget_memories",) in rig.log
+    assert len(rig.client.calls) == 1
+    assert rig.ctl.conversation() == []
+    assert ("user", "BMO, forget everything!") in rig.ui.texts
+    assert ("bmo", "Okay! BMO forgot everything.") in rig.ui.texts
+
+
+def test_forget_during_turn_means_turn_not_stored(rig):
+    rig.client.block = threading.Event()
+    rig.ctl.submit_text("hello")
+    assert rig.client.entered.wait(5)
+    result = rig.ctl.forget_memory()
+    assert result == {"local_cleared": True, "server": "ok", "forgotten": 3}
+    rig.client.block.set()
+    assert rig.ctl.wait_idle(5)
+    assert rig.ctl.conversation() == []
+
+
+def test_failed_turn_stores_nothing(rig):
+    rig.client.error = AuthError("nope")
+    run_text(rig)
+    assert rig.ctl.conversation() == []
+
+
+def test_public_memory_api_never_raises(rig):
+    rig.client.list_memories = lambda: None
+    assert rig.ctl.list_memories() == {"available": False, "memories": [], "error": None}
+    rig.client.list_memories = lambda: [{"id": 1}]
+    assert rig.ctl.list_memories()["available"] is True
+
+    def boom(*a):
+        raise AuthError("x")
+    rig.client.list_memories = boom
+    rig.client.forget_memories = boom
+    rig.client.delete_memory = boom
+    assert rig.ctl.list_memories()["error"] == "AuthError"
+    assert rig.ctl.forget_memory()["server"] == "error"
+    assert rig.ctl.delete_memory(1) == {"available": True, "deleted": False}
+    rig.client.delete_memory = lambda i: None
+    assert rig.ctl.delete_memory(1) == {"available": False, "deleted": False}
+    rig.client.forget_memories = lambda: None
+    assert rig.ctl.forget_memory()["server"] == "unavailable"

@@ -99,3 +99,14 @@ def test_token_never_logged(monkeypatch, tmp_path, caplog):
     caplog.set_level("DEBUG")
     C.read_token(C.Config(token_file=str(tok)))
     assert "super-secret-value" not in caplog.text
+
+
+def test_memory_defaults_and_validation(tmp_path):
+    cfg = C.load_config(C.APP_ROOT / "config.example.json")
+    assert cfg.memory.enabled and cfg.memory.max_messages == 10 and cfg.memory.max_chars == 6000
+    assert cfg.memory.file == "memory.json"
+    for bad in ({"max_messages": 1}, {"max_messages": 11}, {"max_chars": 0}):
+        p = tmp_path / "c.json"
+        p.write_text(json.dumps({"memory": bad}))
+        with pytest.raises(C.ConfigError):
+            C.load_config(p)

@@ -136,6 +136,15 @@ class WakeWordConfig:
 
 
 @dataclass
+class MemoryConfig:
+    # Short-term conversation history sent with each turn, plus server long-term recall.
+    enabled: bool = True
+    max_messages: int = 10
+    max_chars: int = 6000
+    file: str = "memory.json"  # relative to runtime_dir
+
+
+@dataclass
 class Config:
     server_url: str = "http://192.168.0.240:8765"
     token_file: str | None = "/etc/bmo/token"
@@ -156,6 +165,7 @@ class Config:
     input: InputConfig = field(default_factory=InputConfig)
     web: WebConfig = field(default_factory=WebConfig)
     wake_word: WakeWordConfig = field(default_factory=WakeWordConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     def path(self, value: str) -> Path:
         """Resolve a config path relative to the project root."""
@@ -198,6 +208,10 @@ def validate(cfg: Config) -> Config:
     for name in ("capture_rate", "upload_rate", "channels"):
         if int(getattr(mic, name)) <= 0:
             raise ConfigError(f"microphone.{name} must be positive")
+    if not 2 <= int(cfg.memory.max_messages) <= 10:
+        raise ConfigError("memory.max_messages must be 2-10")
+    if int(cfg.memory.max_chars) <= 0:
+        raise ConfigError("memory.max_chars must be positive")
     actions = {"up", "down", "left", "right", "a", "b", "start", "quit"}
     bad = {k: v for k, v in cfg.input.keymap.items() if v not in actions}
     if bad:
