@@ -1,176 +1,185 @@
-# Be More Agent 🤖
-**A Customizable, Offline-First AI Agent for Raspberry Pi**
+# BMO Thin Client
 
-[![Watch the Demo](https://img.youtube.com/vi/l5ggH-YhuAw/maxresdefault.jpg)](https://youtu.be/l5ggH-YhuAw)
+A Raspberry Pi front end for a BMO robot. The Pi handles the microphone, camera, speaker, buttons and face display. A home AI server does all the thinking.
 
-![Python](https://img.shields.io/badge/Python-3.9%2B-blue) ![Platform](https://img.shields.io/badge/Platform-Raspberry%20Pi-red) ![License](https://img.shields.io/badge/License-MIT-green)
+This is a fork of [brenpoly/be-more-agent](https://github.com/brenpoly/be-more-agent). Upstream is a fully local, offline agent that runs Ollama, whisper.cpp, Piper and Moondream on the Pi itself. This fork turns it into a thin client for a home AI server. **The Pi holds no models.** LLM, vision, speech-to-text and text-to-speech all run on the server. Many thanks to the upstream author, brenpoly, for the original project, the faces and the sounds.
 
-This project turns a Raspberry Pi into a fully functional, conversational AI agent. Unlike cloud-based assistants, this agent runs **100% locally** on your device. It listens for a wake word, processes speech, "thinks" using a local Large Language Model (LLM), and speaks back with a low-latency neural voice—all while displaying reactive face animations.
-
-**It is designed as a blank canvas:** You can easily swap the face images and sound effects to create your own character!
-
-## ✨ Features
-
-* **100% Local Intelligence**: Powered by **Ollama** (LLM) and **Whisper.cpp** (Speech-to-Text). No API fees, no cloud data usage.
-* **Open Source Wake Word**: Wakes up to your custom model using **OpenWakeWord** (Offline & Free). No access keys required.
-* **Hardware-Aware Audio**: Automatically detects your microphone's sample rate and resamples audio on the fly to prevent ALSA errors.
-* **Smart Web Search**: Uses DuckDuckGo to find real-time news and information when the LLM doesn't know the answer.
-* **Reactive Faces**: The GUI updates the character's face based on its state (Listening, Thinking, Speaking, Idle).
-* **Fast Text-to-Speech**: Uses **Piper TTS** for low-latency, high-quality voice generation on the Pi.
-* **Vision Capable**: Can "see" and describe the world using a connected camera and the **Moondream** vision model.
-
-## 🛠️ Hardware Requirements
-
-* **Raspberry Pi 5** (Recommended) or Pi 4 (4GB RAM minimum)
-* USB Microphone & Speaker
-* LCD Screen (DSI or HDMI)
-* Raspberry Pi Camera Module
-
----
-
-## 📂 Project Structure
+## Architecture
 
 ```text
-be-more-agent/
-├── agent.py                   # The main brain script
-├── setup.sh                   # Auto-installer script
-├── wakeword.onnx              # OpenWakeWord model (The "Ear")
-├── config.json                # User settings (Models, Prompt, Hardware)
-├── chat_memory.json           # Conversation history
-├── requirements.txt           # Python dependencies
-├── whisper.cpp/               # Speech-to-Text engine
-├── piper/                     # Piper TTS engine & voice models
-├── sounds/                    # Sound effects folder
-│   ├── greeting_sounds/       # Startup .wav files
-│   ├── thinking_sounds/       # Looping .wav files
-│   ├── ack_sounds/            # "I heard you" .wav files
-│   └── error_sounds/          # Error/Confusion .wav files
-└── faces/                     # Face images folder
-    ├── idle/                  # .png sequence for idle state
-    ├── listening/             # .png sequence for listening
-    ├── thinking/              # .png sequence for thinking
-    ├── speaking/              # .png sequence for speaking
-    ├── error/                 # .png sequence for errors
-    └── warmup/                # .png sequence for startup
+Raspberry Pi 4 (bmo-pi)                          Home AI server
++-----------------------------+                  +-----------------------------+
+| USB mic  -> arecord 48 kHz  |                  | /v1/status, /v1/models      |
+| Camera   -> rpicam-still    |   HTTP + token   | /v1/bmo/reservation         |
+| Buttons  -> HID keyboard    | ---------------> | /v1/bmo/interact            |
+| Face display (Tk, 800x480)  |                  |   LLM + vision + Whisper    |
+| USB speaker <- aplay        | <--------------- |   + TTS (WAV in the reply)  |
++-----------------------------+                  | /v1/requests/{id}/cancel    |
+                                                 +-----------------------------+
 ```
 
----
+Removed compared to upstream: Ollama, whisper.cpp, Piper and its voices, Moondream, DuckDuckGo search, local chat memory, and `sounddevice`/`numpy`/`scipy`. The monolithic `agent.py` is now the `app/` package. Faces, sounds, the state machine concept and OpenWakeWord (optional, off by default) are kept. See `PLAN.md` for the full refactor plan.
 
-## 🚀 Installation
+## Hardware
 
-### 1. Prerequisites
-Ensure your Raspberry Pi OS is up to date.
-```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install git -y
-```
+* Raspberry Pi 4, Raspberry Pi OS Lite 64-bit (no display server yet)
+* Camera Module v2 (IMX219), captured with `rpicam-still`
+* USB microphone: C-Media "USB PnP Sound Device"
+* USB speaker: "UACDemoV1.0"
+* Freenove 5" 800x480 DSI display
+* Adafruit Feather 32u4 acting as a USB HID keyboard for the 7 buttons (Up, Down, Left, Right, A, B, Start). Planned, not wired yet. A normal USB keyboard works in the meantime.
 
-### 2. Install Ollama
-This agent relies on [Ollama](https://ollama.com) to run the brain.
-```bash
-curl -fsSL https://ollama.com/install.sh| sh
-```
-*Pull the required models:*
-```bash
-ollama pull gemma:2b
-ollama pull moondream
-```
+## Setup
 
-### 3. Clone & Setup
 ```bash
-git clone https://github.com/brenpoly/be-more-agent.git
+git clone <this repo> be-more-agent
 cd be-more-agent
-chmod +x setup.sh
 ./setup.sh
 ```
-*The setup script will install system libraries, create necessary folders, download Piper TTS, and set up the Python virtual environment.*
 
-### 4. Configure the Wake Word
-The setup script downloads a default wake word ("Hey Jarvis"). To use your own:
-1. Train a model at [OpenWakeWord](https://github.com/dscripka/openWakeWord).
-2. Place the `.onnx` file in the root folder.
-3. Rename it to `wakeword.onnx`.
+`setup.sh` installs a few apt packages (`python3-venv python3-tk ffmpeg alsa-utils rpicam-apps`), creates a venv, installs `requirements.txt`, creates `runtime/`, copies `config.example.json` to `config.json` if it is missing, and checks for the credential file. It downloads no models.
 
-### 5. Run the Agent
+| Flag | Effect |
+|---|---|
+| `--venv PATH` | Virtualenv location (default `./venv`) |
+| `--skip-apt` | Do not install system packages |
+| `--dev` | Also install `requirements-dev.txt` (pytest) |
+| `--with-wakeword` | Also install `requirements-wakeword.txt` |
+| `--install-service` | Install `/etc/systemd/system/bmo-agent.service` (not enabled or started) |
+| `--dry-run` | Print each command instead of running it |
+
+### Credential
+
+The physical BMO needs its own server credential, stored in a file that is read at runtime. It is searched in this order:
+
+1. `$BMO_TOKEN_FILE`
+2. `token_file` in `config.json` (default `/etc/bmo/token`)
+3. `/etc/bmo/token`
+4. `~/.config/bmo/token`
+
+Never commit, print or paste this file. The client only puts it in a request header and never logs it. Keep the file outside the repo.
+
+### Configuration
+
+Edit `config.json` (copied from `config.example.json`). Any subset of keys overrides the defaults.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `server_url` | `http://192.168.0.240:8765` | Home server |
+| `token_file` | `/etc/bmo/token` | Credential file |
+| `model` | `bmo-qwen3-vl-8b` | Server model name |
+| `microphone.device` / `.match` / `.fallback_device` | `auto` / `USB PnP Sound Device` / `plughw:1,0` | Mic selection |
+| `microphone.gain_db` | `18` | Software gain applied before upload |
+| `speaker.device` / `.match` / `.fallback_device` | `auto` / `UACDemoV1.0` / `plughw:2,0` | Speaker selection |
+| `camera.enabled`, `.rotation` | `true`, `0` | Camera on/off, rotation (0/90/180/270) |
+| `camera.vision_mode` | `always` | `off`, `always` or `manual` |
+| `ui.enabled`, `.fullscreen` | `true`, `true` | Face GUI |
+| `sounds.*` | all `true` | Greeting, ack and thinking sounds |
+| `input.evdev_enabled`, `.evdev_device` | `true`, `auto` | Read HID keyboards from `/dev/input` |
+| `wake_word.enabled` | `false` | Optional OpenWakeWord |
+
+Environment overrides: `BMO_SERVER_URL` (or `BMO_URL`), `BMO_MIC_DEVICE`, `BMO_SPEAKER_DEVICE`, `BMO_MIC_GAIN_DB`.
+
+## Running
+
 ```bash
-source venv/bin/activate
-python agent.py
+./venv/bin/python -m app --self-test      # physical acceptance diagnostics
+./venv/bin/python -m app --headless       # console + HID buttons
+./venv/bin/python -m app --text "Hello"   # one text message, speak the reply, exit
+./venv/bin/python -m app --gui            # Tk face GUI (needs X/Wayland)
 ```
 
----
+Other flags: `--config FILE`, `--no-speak` (with `--text`: print only), `-v`. `./start_agent.sh [args]` runs `python -m app` from the venv (set `BMO_VENV` to use another one). Pi OS Lite has no display server yet, so use `--headless` until a kiosk/X setup exists. With no mode flag, the GUI is used if a display is available and headless otherwise.
 
-## 📂 Configuration (`config.json`)
+Headless console commands:
 
-You can modify the hardware behavior and personality in `config.json`. The `agent.py` script creates this on the first run if it doesn't exist, but you can create it manually:
+| Input | Action |
+|---|---|
+| Enter | Talk / stop talking / interrupt (depending on state) |
+| `i` | Interrupt |
+| `a`, `b` | Press button A or B |
+| `t <text>` | Send a text message |
+| `q` | Quit |
 
-```json
-{
-    "text_model": "gemma3:1b",
-    "vision_model": "moondream",
-    "voice_model": "piper/en_GB-semaine-medium.onnx",
-    "chat_memory": true,
-    "camera_rotation": 0,
-    "system_prompt_extras": "You are a helpful robot assistant. Keep responses short and cute."
-}
+### systemd service
+
+```bash
+./setup.sh --skip-apt --install-service
 ```
 
----
+This installs the unit but does not enable it. Enable it only after the acceptance tests pass:
 
-## 🎨 Customizing Your Character
+```bash
+sudo systemctl enable --now bmo-agent
+```
 
-This software is a generic framework. You can give it a new personality by replacing the assets:
+The service runs `python -m app --headless` as your user, with the `audio`, `video` and `input` groups, and releases its server reservation on SIGTERM.
 
-1.  **Faces:** The script looks for PNG sequences in `faces/[state]/`. It will loop through all images found in the folder.
-2.  **Sounds:** Put multiple `.wav` files in the `sounds/[category]/` folders. The robot will pick one at random each time (e.g., different "thinking" hums or "error" buzzes).
+## Buttons
 
----
-## 🗣️ The Custom BMO Voice
+Default key mapping (override with `input.keymap` in `config.json`; actions are `up`, `down`, `left`, `right`, `a`, `b`, `start`, `quit`):
 
-This project features a custom, locally fine-tuned text-to-speech model to make the agent sound authentic! 
+| Keys | Action |
+|---|---|
+| Enter, Space | Start: talk, stop talking, or interrupt when busy |
+| Up / Down / Left / Right | up / down / left / right |
+| A, Z | a |
+| B, X | b |
+| Esc | quit |
 
-When you run the `setup.sh` script, it will automatically download the compiled `.onnx` model and its `.json` configuration file from the [Releases page](https://github.com/brenpoly/be-more-agent/releases) and place them into a local `voices/` directory.
+`camera.vision_mode`:
 
-**Manual Installation (if you are not using setup.sh):**
-1. Download `bmo.onnx` and `bmo.onnx.json` from the [Latest Release](https://github.com/brenpoly/be-more-agent/releases).
-2. Create a folder named `voices/` in the root directory of this repository.
-3. Place both downloaded files inside the `voices/` folder.
-4. Ensure your `config.json` file points to the new model:
-   ```json
-   "voice_model": "voices/bmo.onnx"
----
+* `off`: never send a picture.
+* `always`: capture and send a photo with every spoken turn.
+* `manual`: press B to arm the camera for the next turn only. Press B again to disarm.
 
-## ⚠️ Troubleshooting
+## Device detection
 
-* **"No search library found":** If web search fails, ensure you are in the virtual environment and `duckduckgo-search` is installed via pip.
-* **Shutdown Errors:** When you exit the script (Ctrl+C), you might see `Expression 'alsa_snd_pcm_mmap_begin' failed`. **This is normal.** It just means the audio stream was cut off mid-sample. It does not affect the functionality.
-* **Audio Glitches:** If the voice sounds fast or slow, the script attempts to auto-detect sample rates. Ensure your `config.json` points to a valid `.onnx` voice model in the `piper/` folder.
-If your custom BMO voice sounds incredibly deep, slow, or "demonic," don't panic! This is not an issue with the Piper installation or the setup script. It is almost always caused by a **Sample Rate (Hz)** mismatch between the model and the audio player.
+Mic and speaker `device: "auto"` looks through `/proc/asound/cards` for a card whose name contains `match`, and uses `plughw:CARD=<id>,DEV=0`. If nothing matches it logs a warning and uses `fallback_device` (`plughw:1,0` for the mic, `plughw:2,0` for the speaker). ALSA card numbers can change between boots, so names are used instead of numbers. Setting `microphone.device`, `speaker.device` or the `BMO_*_DEVICE` variables bypasses detection.
 
-Here is how to fix it:
+## Server API
 
-**Fix 1: Match the Sample Rate**
-By default, `agent.py` expects "medium" quality models and plays audio at 22050 Hz. If your custom model was trained at a different quality (like 48000 Hz or 16000 Hz), playing it at the default rate will stretch or compress the audio, severely altering the pitch.
+Endpoints used: `GET /v1/status`, `GET /v1/models`, `POST /v1/bmo/reservation`, `DELETE /v1/bmo/reservation`, `POST /v1/bmo/interact` (fields `audio`, `image`, `speak`), `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`, `POST /v1/chat/completions`, `POST /v1/requests/{id}/cancel`. Every request carries the credential and a unique `X-Request-ID`.
 
-1. Open your model's configuration file (e.g., `voices/bmo.onnx.json`).
-2. Look for the `"sample_rate"` property and note the number (e.g., `22050`, `16000`, `48000`).
-3. Open `agent.py` and find the line: `PIPER_RATE = 22050`.
-4. Change that number to match the sample rate in your `.json` file.
-5. Save the file and restart the agent.
+**Reservation.** Before inference the client reserves the GPU. A `200` means ready. A `202` means the server is restoring, so the client polls `/v1/status` until `bmo_ready`, then POSTs again and requires `200`. The reservation lasts 300 s and is renewed on use (the client renews after 240 s idle). It is released with `DELETE` on exit or SIGTERM.
 
-**Fix 2: Check the Length Scale**
-If the sample rates match perfectly, the issue might be the model's internal pacing setting.
+**Interruption.** Pressing Start (or `i`) while thinking or speaking:
 
-1. Open your `voices/bmo.onnx.json` file.
-2. Look inside the `"inference"` block for a setting called `"length_scale"`. 
-3. Piper uses this to determine the speed of the voice. If this value is set significantly higher than `1.0`, it will stretch the audio and make BMO sound like a zombie. Lower it closer to `1.0` to speed the voice back up to normal.
+1. stops the speaker immediately,
+2. marks the in-flight interaction stale so its response is dropped and never played,
+3. cancels it on the server via `POST /v1/requests/{id}/cancel` using its `X-Request-ID`,
+4. before the next request, waits for `/v1/status` `bmo_ready` and re-confirms the reservation, because a cancel acknowledgement does not mean the GPU is clean.
 
-## 📄 License
+## Testing
+
+```bash
+./setup.sh --skip-apt --dev     # or: pip install -r requirements-dev.txt
+./venv/bin/python -m pytest
+```
+
+Unit tests use a fake server. `tools/bmo_test.py` is the reference acceptance test that proved the hardware and server path on this Pi. `python -m app --self-test` runs the app's own diagnostics.
+
+## Troubleshooting
+
+* **No sound:** use the `plughw:` layer, not raw `hw:`. The USB speaker only works through ALSA's plug layer. List cards with `aplay -l` and `arecord -l`, check the names against `speaker.match` and `microphone.match`, or set `BMO_SPEAKER_DEVICE` / `BMO_MIC_DEVICE` explicitly.
+* **Mic too quiet:** raise `microphone.gain_db` (or `BMO_MIC_GAIN_DB`), and check capture level and AGC with `amixer -c <card> contents` / `alsamixer`. The app sets capture to 100% and enables AGC by default.
+* **401 Unauthorized:** the wrong credential. Use the physical BMO credential, not the general one, and check which file is picked up (see the Credential section).
+* **202 / long wait on first request:** the server is restoring the BMO model. The client waits (up to `readiness_timeout`, 300 s) and retries on its own.
+* **No display:** Pi OS Lite has no X server, so `--gui` exits with "No display available". Use `--headless`.
+* **Shutdown noise:** `alsa_snd_pcm_mmap_begin` messages on Ctrl+C are harmless.
+
+## Customizing the character
+
+Faces are PNG sequences in `faces/<state>/` and sounds are `.wav` files in `sounds/<category>/`. Replace them to give the robot a new look; one sound is picked at random per category.
+
+## License
+
 This project is dual-licensed:
 
 * **Software / Code:** All source code is licensed under the [MIT License](LICENSE).
 * **Hardware / 3D Models:** The `.obj`, `.stl`, and other 3D modeling files associated with the physical case are licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
-## ⚖️ Legal Disclaimer
+## Legal Disclaimer
 Disclaimer: Fan Project
 This repository and the associated voice model are a non-commercial, open-source fan project. "BMO" and Adventure Time are registered trademarks and copyrights of Cartoon Network and Warner Bros. Discovery. This project is not affiliated with, endorsed by, or sponsored by Cartoon Network or its parent companies.
 
