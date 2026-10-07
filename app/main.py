@@ -60,6 +60,20 @@ def _start_evdev(cfg, controller):
     return reader
 
 
+def _start_web(cfg, controller):
+    """Local web page (text chat, settings, status). Failure never stops BMO."""
+    if not cfg.web.enabled:
+        return None
+    from app.web.server import WebServer
+    try:
+        web = WebServer(cfg, controller)
+        web.start()
+        return web
+    except OSError as e:
+        logging.getLogger(__name__).warning("Web interface not started: %s", e)
+        return None
+
+
 def run_interactive(cfg, use_gui: bool) -> int:
     from app.controller import InteractionController
 
@@ -89,6 +103,7 @@ def run_interactive(cfg, use_gui: bool) -> int:
 
     # Hardware buttons via evdev. In GUI mode Tk receives the keys itself.
     reader = None if use_gui else _start_evdev(cfg, controller)
+    web = _start_web(cfg, controller)
     threading.Thread(target=controller.start, name="bmo-warmup", daemon=True).start()
     try:
         if use_gui or sys.stdin.isatty():
@@ -99,6 +114,8 @@ def run_interactive(cfg, use_gui: bool) -> int:
     finally:
         if reader is not None:
             reader.stop()
+        if web is not None:
+            web.stop()
         controller.shutdown()
     return 0
 

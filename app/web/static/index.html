@@ -146,6 +146,7 @@ function onEvent(ev){
     $("bannerText").textContent=(ev.message||"Error")+(ev.hint?" - "+ev.hint:"");
     $("banner").classList.remove("hidden");
   }
+  else if(ev.type==="notice")addMsg("bmo",(ev.message||"")+(ev.hint?" "+ev.hint:""));
 }
 function connect(){
   if(es)es.close();

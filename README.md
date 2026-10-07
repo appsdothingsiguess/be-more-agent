@@ -73,11 +73,16 @@ Edit `config.json` (copied from `config.example.json`). Any subset of keys overr
 | `microphone.gain_db` | `18` | Software gain applied before upload |
 | `speaker.device` / `.match` / `.fallback_device` | `auto` / `UACDemoV1.0` / `plughw:2,0` | Speaker selection |
 | `camera.enabled`, `.rotation` | `true`, `0` | Camera on/off, rotation (0/90/180/270) |
-| `camera.vision_mode` | `always` | `off`, `always` or `manual` |
+| `camera.vision_mode` | `manual` | `off`, `always` or `manual` |
+| `speaker.volume` | `50%` | Speaker volume set at startup |
 | `ui.enabled`, `.fullscreen` | `true`, `true` | Face GUI |
+| `ui.text_only` | `false` | Mute: replies and errors are text only, nothing is played |
+| `web.enabled`, `.port`, `.pin_file` | `true`, `8080`, `~/.config/bmo/web_pin` | Local web page |
 | `sounds.*` | all `true` | Greeting, ack and thinking sounds |
 | `input.evdev_enabled`, `.evdev_device` | `true`, `auto` | Read HID keyboards from `/dev/input` |
 | `wake_word.enabled` | `false` | Optional OpenWakeWord |
+
+Settings changed from the web page (volume, mute, camera mode, sound effects, mic boost) are saved to `runtime/settings.json` and override `config.json` at the next start.
 
 Environment overrides: `BMO_SERVER_URL` (or `BMO_URL`), `BMO_MIC_DEVICE`, `BMO_SPEAKER_DEVICE`, `BMO_MIC_GAIN_DB`.
 
@@ -126,13 +131,33 @@ Default key mapping (override with `input.keymap` in `config.json`; actions are 
 | Up / Down / Left / Right | up / down / left / right |
 | A, Z | a |
 | B, X | b |
-| Esc | quit |
+
+Esc does not quit (an accidental press used to leave the service running but deaf). Quit with `q` in the console or stop the service.
 
 `camera.vision_mode`:
 
 * `off`: never send a picture.
 * `always`: capture and send a photo with every spoken turn.
-* `manual`: press B to arm the camera for the next turn only. Press B again to disarm.
+* `manual` (default): press B to arm the camera for the next turn only. Press B again to disarm.
+
+## Errors and mute
+
+Every failure has a short message and a next step, for example "I can't reach my brain server. Check that the computer is on and on the network, then press Start to try again." BMO shows it on the console, the screen and the web page, and plays a pre-recorded clip of it from `sounds/errors/` (so it still works when the server is down). With `ui.text_only` (mute) on, nothing is played. Server-side refusals (a large model running, GPU switching, BMO restoring) use the server's own message. While the server is getting BMO ready, BMO says once that it is waiting.
+
+The clips are generated with the server voice: `./venv/bin/python tools/make_error_clips.py [--force]` after editing `app/notify.py`.
+
+## Web page
+
+While BMO runs (`--headless` or `--gui`), it serves a page on port 8080: `http://<pi-address>:8080` (this Pi: `http://192.168.0.218:8080`) from any device on the home network. It offers:
+
+* a text chat with BMO, with a "Speak reply" toggle that follows the mute setting
+* live state, errors and "waiting for the server" notices
+* settings: volume, mute (text only), camera mode, sound effects, mic boost
+* a server panel: reachable, ready, mode, queue, last error
+
+**PIN.** The first start creates a 6-digit PIN in `~/.config/bmo/web_pin` (mode 600). Read it with `cat ~/.config/bmo/web_pin`; delete the file to get a new one. After 5 wrong PINs, that device is locked out for 5 minutes.
+
+**What it exposes.** The page talks only to the Pi; the server credential never reaches the browser. There is no HTTPS, so keep it on your home network. Turn it off with `"web": {"enabled": false}`.
 
 ## Device detection
 
