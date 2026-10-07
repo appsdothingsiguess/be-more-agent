@@ -1,83 +1,133 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# BMO thin-client setup for Raspberry Pi OS Lite (64-bit).
+#
+# Architecture change from upstream: the original script installed and
+# downloaded local AI runtimes and model files onto the Pi. In this fork ALL
+# AI work (LLM, vision, speech-to-text, text-to-speech) runs on the home
+# server. The Pi is a thin client: it captures audio and camera frames, talks
+# to the server over HTTP, and plays back the result. This script therefore
+# installs only a few system packages and Python libraries. It downloads
+# nothing and the Pi holds no models.
+#
+# Run as the normal user. sudo is used only for apt and --install-service.
+set -euo pipefail
 
-# Define colors for output
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m' # No Color
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV="$REPO/venv"
+SKIP_APT=0
+WITH_WAKEWORD=0
+WITH_DEV=0
+INSTALL_SERVICE=0
+DRY_RUN=0
 
-echo -e "${GREEN}🤖 Pi Local Assistant Setup Script${NC}"
+usage() {
+    cat <<USAGE
+Usage: ./setup.sh [options]
 
-# 1. Install System Dependencies (The "Hidden" Requirements)
-echo -e "${YELLOW}[1/6] Installing System Tools (apt)...${NC}"
-sudo apt update
-sudo apt install -y python3-tk python3-dev libasound2-dev portaudio19-dev liblapack-dev libblas-dev cmake build-essential espeak-ng git
+  --help              Show this help and exit
+  --venv PATH         Virtualenv location (default: ./venv in the repo)
+  --skip-apt          Do not install system packages
+  --with-wakeword     Also install requirements-wakeword.txt
+  --dev               Also install requirements-dev.txt (pytest)
+  --install-service   Install /etc/systemd/system/bmo-agent.service
+                      (does NOT enable or start it)
+  --dry-run           Print each command instead of running it
+USAGE
+}
 
-# 2. Create Folders
-echo -e "${YELLOW}[2/6] Creating Folders...${NC}"
-mkdir -p piper
-mkdir -p voices # Added for custom BMO models
-mkdir -p sounds/greeting_sounds
-mkdir -p sounds/thinking_sounds
-mkdir -p sounds/ack_sounds
-mkdir -p sounds/error_sounds
-mkdir -p faces/idle
-mkdir -p faces/listening
-mkdir -p faces/thinking
-mkdir -p faces/speaking
-mkdir -p faces/error
-mkdir -p faces/warmup
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --help|-h) usage; exit 0 ;;
+        --venv)
+            [ $# -ge 2 ] || { echo "--venv needs a path" >&2; exit 2; }
+            VENV="$2"; shift ;;
+        --skip-apt) SKIP_APT=1 ;;
+        --with-wakeword) WITH_WAKEWORD=1 ;;
+        --dev) WITH_DEV=1 ;;
+        --install-service) INSTALL_SERVICE=1 ;;
+        --dry-run) DRY_RUN=1 ;;
+        *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
 
-# 3. Download Piper (Architecture Check)
-echo -e "${YELLOW}[3/6] Setting up Piper TTS...${NC}"
-ARCH=$(uname -m)
-if [ "$ARCH" == "aarch64" ]; then
-    # FIXED: Using the specific 2023.11.14-2 release known to work on Pi
-    wget -O piper.tar.gz https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_aarch64.tar.gz
-    tar -xvf piper.tar.gz -C piper --strip-components=1
-    rm piper.tar.gz
+run() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        echo "[dry-run] $*"
+    else
+        "$@"
+    fi
+}
+
+warn() { echo "WARNING: $*" >&2; }
+
+cd "$REPO"
+
+# 1. Platform check (warn only)
+echo "[1/6] Checking platform..."
+[ "$(uname -m)" = "aarch64" ] || warn "not aarch64 ($(uname -m)); this is meant for a 64-bit Pi."
+if ! grep -qa "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
+    warn "this does not look like a Raspberry Pi."
+fi
+
+# 2. System packages
+echo "[2/6] System packages..."
+if [ "$SKIP_APT" -eq 1 ]; then
+    echo "Skipping apt (--skip-apt)."
 else
-    echo -e "${RED}⚠️  Not on Raspberry Pi (aarch64). Skipping Piper download.${NC}"
+    run sudo apt-get install -y python3-venv python3-tk ffmpeg alsa-utils rpicam-apps
 fi
 
-# 4. Download Voice Models
-echo -e "${YELLOW}[4/6] Downloading Voice Models...${NC}"
-# Download default Piper voice as fallback
-cd piper
-wget -nc -O en_GB-semaine-medium.onnx https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/semaine/medium/en_GB-semaine-medium.onnx
-wget -nc -O en_GB-semaine-medium.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/semaine/medium/en_GB-semaine-medium.onnx.json
-cd ..
-
-# Download Custom BMO Voice
-echo -e "${YELLOW}Downloading custom BMO voice...${NC}"
-curl -L -o voices/bmo-custom.onnx "https://github.com/brenpoly/be-more-agent/releases/latest/download/bmo.onnx"
-curl -L -o voices/bmo-custom.onnx.json "https://github.com/brenpoly/be-more-agent/releases/latest/download/bmo.onnx.json"
-
-# 5. Install Python Libraries
-echo -e "${YELLOW}[5/6] Installing Python Libraries...${NC}"
-# Check if venv exists, if not create it
-if [ ! -d "venv" ]; then
-    python3 -m venv venv
-fi
-source venv/bin/activate
-pip install --upgrade pip
-# Force rebuild sounddevice to link against the newly installed PortAudio dev libraries
-pip install --force-reinstall --no-cache-dir sounddevice
-pip install -r requirements.txt
-
-# 6. Pull AI Models
-echo -e "${YELLOW}[6/6] Checking AI Models...${NC}"
-if command -v ollama &> /dev/null; then
-    ollama pull gemma3:1b
-    ollama pull moondream
+# 3. Virtualenv and Python packages
+echo "[3/6] Python environment at $VENV..."
+if [ ! -x "$VENV/bin/python" ]; then
+    run python3 -m venv "$VENV"
 else
-    echo -e "${RED}❌ Ollama not found. Please install it manually.${NC}"
+    echo "Reusing existing venv."
+fi
+PIP=("$VENV/bin/python" -m pip)
+run "${PIP[@]}" install -r "$REPO/requirements.txt"
+[ "$WITH_DEV" -eq 0 ] || run "${PIP[@]}" install -r "$REPO/requirements-dev.txt"
+[ "$WITH_WAKEWORD" -eq 0 ] || run "${PIP[@]}" install -r "$REPO/requirements-wakeword.txt"
+
+# 4. Runtime dir and config
+echo "[4/6] Runtime directory and config..."
+run mkdir -p "$REPO/runtime"
+if [ ! -e "$REPO/config.json" ]; then
+    run cp "$REPO/config.example.json" "$REPO/config.json"
+else
+    echo "config.json already exists; leaving it alone."
 fi
 
-# 7. OpenWakeWord Model (Added this back so the user has a default)
-if [ ! -f "wakeword.onnx" ]; then
-    echo -e "${YELLOW}Downloading default 'Hey Jarvis' wake word...${NC}"
-    curl -L -o wakeword.onnx https://github.com/dscripka/openWakeWord/raw/main/openwakeword/resources/models/hey_jarvis_v0.1.onnx
+# 5. Credential file presence check (never read or print contents)
+echo "[5/6] Checking for the server credential file..."
+FOUND=""
+for f in "${BMO_TOKEN_FILE:-}" /etc/bmo/token "$HOME/.config/bmo/token"; do
+    if [ -n "$f" ] && [ -r "$f" ]; then FOUND="$f"; break; fi
+done
+if [ -n "$FOUND" ]; then
+    echo "Credential file found: $FOUND"
+else
+    warn "no readable credential file at \$BMO_TOKEN_FILE, /etc/bmo/token or ~/.config/bmo/token."
 fi
 
-echo -e "${GREEN}✨ Setup Complete! Run 'source venv/bin/activate' then 'python agent.py'${NC}"
+# 6. Optional systemd service (installed, not enabled)
+echo "[6/6] Service..."
+if [ "$INSTALL_SERVICE" -eq 1 ]; then
+    UNIT_TMP="$(mktemp)"
+    trap 'rm -f "$UNIT_TMP"' EXIT
+    sed -e "s|@USER@|$(id -un)|g" -e "s|@REPO@|$REPO|g" -e "s|@PYTHON@|$VENV/bin/python|g" \
+        "$REPO/tools/bmo-agent.service" > "$UNIT_TMP"
+    run sudo install -m 644 "$UNIT_TMP" /etc/systemd/system/bmo-agent.service
+    run sudo systemctl daemon-reload
+    echo "Service installed but NOT enabled or started."
+    echo "Only after the acceptance tests pass, run:"
+    echo "  sudo systemctl enable --now bmo-agent"
+else
+    echo "Not installing the service (use --install-service)."
+fi
+
+echo
+echo "Done. Next steps:"
+echo "  $VENV/bin/python -m app --self-test"
+echo "  $VENV/bin/python -m app --headless"

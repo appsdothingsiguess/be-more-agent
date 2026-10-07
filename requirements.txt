@@ -1,8 +1,4 @@
-sounddevice
-numpy
-scipy
-openwakeword
-onnxruntime
-ollama
-duckduckgo-search
-Pillow
+# Thin client: all AI runs on the server. Tk comes from apt (python3-tk).
+# Removed from upstream: ollama, sounddevice, numpy, scipy, duckduckgo-search, openwakeword.
+requests>=2.28
+Pillow>=9.5

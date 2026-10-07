@@ -1,0 +1,23 @@
+# Template rendered by setup.sh --install-service (@USER@, @REPO@, @PYTHON@).
+# Do NOT enable this until the acceptance tests pass.
+[Unit]
+Description=BMO thin client
+After=network-online.target sound.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO@
+ExecStart=@PYTHON@ -m app --headless
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+SupplementaryGroups=audio video input
+
+[Install]
+WantedBy=multi-user.target
