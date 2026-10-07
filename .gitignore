@@ -42,3 +42,19 @@ test_audio.wav
 .DS_Store
 Thumbs.db
 ehthumbs.db
+
+# --- BMO thin-client (fork) ---
+# Keep the shipped optional wake word model
+!wakeword.onnx
+# Local runtime config (copied from config.example.json by setup.sh)
+config.json
+# Device credentials must never be committed
+token
+*.token
+.config/
+# Runtime scratch (recordings, camera frames, replies)
+runtime/
+.pytest_cache/
+# Character assets are part of the repo
+!faces/**/*.png
+!sounds/**/*.wav
