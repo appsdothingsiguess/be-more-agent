@@ -32,8 +32,9 @@ Removed compared to upstream: Ollama, whisper.cpp, Piper and its voices, Moondre
 ## Setup
 
 ```bash
-git clone <this repo> be-more-agent
+git clone https://github.com/appsdothingsiguess/be-more-agent.git
 cd be-more-agent
+git checkout thin-client-refactor
 ./setup.sh
 ```
 
