@@ -304,6 +304,111 @@ def test_shutdown_releases_reservation_once(rig):
     assert ("mic_start",) not in rig.log
 
 
+SOUNDS = Path(__file__).resolve().parent.parent / "sounds"
+
+
+def test_text_only_never_plays_and_asks_for_no_audio(rig):
+    rig.cfg.ui.text_only = True
+    rig.ctl.submit_text("hi")
+    _join_turns()
+    assert rig.client.calls[-1]["speak"] is False
+    assert "play" not in names(rig.log) and ("effect", "ack") not in rig.log
+    assert ("bmo", "reply to req-1") in rig.ui.texts
+
+
+def test_per_message_speak_overrides_mute(rig):
+    rig.cfg.ui.text_only = True
+    rig.ctl.submit_text("hi", speak=True)
+    _join_turns()
+    assert rig.client.calls[-1]["speak"] is True and "play" in names(rig.log)
+
+
+def test_server_busy_shows_server_message_and_plays_clip(rig):
+    from app.server.errors import ServerBusy
+    rig.spk.sounds_dir = SOUNDS
+    events = []
+    rig.ctl.subscribe(events.append)
+    rig.client.error = ServerBusy("large_model_session_active", "Busy with a large model.", 503)
+    rig.ctl.submit_text("hi")
+    _join_turns()
+    assert rig.ctl.state is BotState.ERROR
+    err = [e for e in events if e["type"] == "error"][-1]
+    assert err["code"] == "server_busy_large_model" and err["message"] == "Busy with a large model."
+    assert ("play", "server_busy_large_model.wav") in rig.log
+    assert err in rig.ctl.history
+
+
+def test_error_clip_muted_in_text_only(rig):
+    rig.spk.sounds_dir = SOUNDS
+    rig.cfg.ui.text_only = True
+    rig.client.error = AuthError("401")
+    rig.ctl.submit_text("hi")
+    _join_turns()
+    assert rig.ctl.state is BotState.ERROR
+    assert not any(e[0] == "play" for e in rig.log)
+    assert any("doesn't recognise me" in t for _, t in rig.ui.texts)
+
+
+def test_nothing_heard_is_soft(rig):
+    rig.spk.sounds_dir = SOUNDS
+    rig.mic.result = None
+    rig.ctl.handle_action(Action.START)
+    rig.ctl.handle_action(Action.START)
+    _join_turns()
+    assert rig.ctl.state is BotState.IDLE
+    assert ("play", "nothing_heard.wav") in rig.log
+
+
+def test_waiting_notice_once_per_turn(rig):
+    events = []
+    rig.ctl.subscribe(events.append)
+
+    def slow_ready():
+        rig.log.append(("ensure_ready",))
+        rig.ctl._on_server_wait({"scheduling_state": "restoring_bmo"})
+        rig.ctl._on_server_wait({"scheduling_state": "restoring_bmo"})
+    rig.res.ensure_ready = slow_ready
+    rig.ctl.submit_text("hi")
+    _join_turns()
+    notices = [e for e in events if e["type"] == "notice"]
+    assert len(notices) == 1 and notices[0]["code"] == "server_waiting"
+    assert rig.ctl.state is BotState.IDLE  # the turn carried on
+
+
+def test_events_and_history(rig):
+    events = []
+    unsubscribe = rig.ctl.subscribe(events.append)
+    rig.ctl.submit_text("hi")
+    _join_turns()
+    types = [e["type"] for e in events]
+    assert "state" in types and "text" in types
+    assert [e["who"] for e in rig.ctl.history if e["type"] == "text"][-2:] == ["user", "bmo"]
+    unsubscribe()
+    n = len(events)
+    rig.ctl.submit_text("again")
+    _join_turns()
+    assert len(events) == n
+
+
+def test_apply_setting_volume_persists(rig):
+    from app.settings import SettingError, settings_path
+    assert rig.ctl.apply_setting("speaker.volume", 80) == "80%"
+    assert names(rig.log).count("speaker_configure") == 2
+    assert settings_path(rig.cfg).is_file()
+    with pytest.raises(SettingError):
+        rig.ctl.apply_setting("server_url", "http://x")
+
+
+def test_server_status_summary_cached(rig):
+    calls = []
+    rig.client.status = lambda: calls.append(1) or {"bmo_ready": True, "scheduling_state": "normal",
+                                                     "queued_requests": 0, "active_requests": 1}
+    a = rig.ctl.server_status()
+    b = rig.ctl.server_status()
+    assert a == b and len(calls) == 1
+    assert a["reachable"] and a["bmo_ready"] and a["mode"] == "normal"
+
+
 def _join_turns():
     for t in threading.enumerate():
         if t.name.startswith("bmo-turn"):

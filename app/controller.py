@@ -20,7 +20,9 @@ from typing import Any, Callable
 from app.config import Config
 from app.hardware.camera import CameraError
 from app.hardware.input import Action
-from app.server.errors import AuthError, BMOError, RequestCancelled, ServerUnavailable
+from app.notify import ERRORS, NOTICES, SERVER_CODES, SOFT, clip_path
+from app.server.errors import (AuthError, BMOError, RequestCancelled, ReservationTimeout,
+                               ServerBusy, ServerUnavailable)
 from app.ui.states import BotState
 
 log = logging.getLogger(__name__)
@@ -53,6 +55,9 @@ class InteractionController:
         self._subscribers: list[Callable[[dict], None]] = []
         self.history: deque[dict] = deque(maxlen=50)  # recent text/error events
         self._status_cache: tuple[float, dict] | None = None
+        self._waiting_announced = False
+        # Say "waiting for my brain server" while the reservation polls bmo_ready.
+        reservation.on_wait = self._on_server_wait
 
         cfg.runtime_path.mkdir(parents=True, exist_ok=True)
 
@@ -107,6 +112,40 @@ class InteractionController:
     def _show(self, text: str, who: str = "bmo") -> None:
         self.ui.show_text(text, who)
         self._emit({"type": "text", "who": who, "text": text})
+
+    # ------------------------------------------------------------ notifications
+    def notify(self, code: str, *, gen: int | None = None, server_message: str = "",
+               play: bool = True) -> bool:
+        """Report an error/notice: state, console/screen text, web event, and the
+        pre-recorded clip unless muted. Returns False if the turn went stale."""
+        info = ERRORS.get(code) or ERRORS["unknown"]
+        message = server_message or info.message
+        if code not in NOTICES:
+            state = BotState.IDLE if code in SOFT else BotState.ERROR
+            if not self._set_state(state, message, gen):
+                return False
+        elif gen is not None and self._stale(gen):
+            return False
+        log.info("notify %s: %s", code, message)
+        self.ui.show_text(f"{message} {info.hint}", "bmo")
+        self._emit({"type": "error" if code not in NOTICES else "notice",
+                    "code": code, "message": message, "hint": info.hint})
+        if play and not self.cfg.ui.text_only:
+            clip = clip_path(self.speaker.sounds_dir, code) if hasattr(self.speaker, "sounds_dir") else None
+            if clip is not None and clip.is_file():
+                self.speaker.play(clip, block=False)
+        return True
+
+    def _on_server_wait(self, status: dict) -> None:
+        """Reservation is polling for bmo_ready: tell the user once per turn."""
+        if self._waiting_announced or self._state is not BotState.THINKING:
+            return
+        self._waiting_announced = True
+        with self._lock:
+            gen = self._generation
+        log.info("Waiting for BMO workers (server state %s, queued %s)",
+                 status.get("scheduling_state"), status.get("queued_requests"))
+        self.notify("server_waiting", gen=gen)
 
     # --------------------------------------------------------------- settings
     def apply_setting(self, key: str, value: Any) -> Any:
@@ -164,7 +203,8 @@ class InteractionController:
         try:
             self.client.health()
         except BMOError as e:
-            self._set_state(BotState.ERROR, f"Server unreachable: {e}")
+            log.warning("Server health check failed: %s", e)
+            self.notify("server_unreachable")
             return
         self._set_state(BotState.IDLE, "Press Start to talk")
         if not self.cfg.ui.text_only and self.cfg.sounds.enabled and self.cfg.sounds.greeting:
@@ -214,9 +254,9 @@ class InteractionController:
             gen = self._generation
         try:
             self.mic.start()
-        except Exception as e:
+        except Exception:
             log.exception("Could not start recording")
-            self._set_state(BotState.ERROR, f"Microphone error: {e}")
+            self.notify("mic_failed")
             return
         self._set_state(BotState.LISTENING, "Listening... press Start when done")
         timer = threading.Timer(self.cfg.microphone.max_seconds, self._listen_timeout, args=(gen,))
@@ -298,7 +338,7 @@ class InteractionController:
                 if self._stale(gen):
                     return
                 if audio is None:
-                    self._set_state(BotState.IDLE, "I didn't hear anything", gen)
+                    self.notify("nothing_heard", gen=gen)
                     return
 
             image = None
@@ -308,6 +348,7 @@ class InteractionController:
                     image = self.camera.capture()
                 except CameraError as e:
                     log.warning("Camera capture failed, continuing without image: %s", e)
+                    self.notify("camera_failed", gen=gen, play=False)
                 if self._stale(gen):
                     return
 
@@ -316,6 +357,7 @@ class InteractionController:
             if speak and self.cfg.sounds.enabled and self.cfg.sounds.ack:
                 self.speaker.play_effect("ack")
 
+            self._waiting_announced = False
             with self._lock:
                 recheck, self._needs_readiness = self._needs_readiness, False
             if recheck:
@@ -356,16 +398,23 @@ class InteractionController:
             self._set_state(BotState.IDLE, "", gen)
         except RequestCancelled:
             log.info("Request cancelled")
-            self._set_state(BotState.IDLE, "Cancelled", gen)
+            self.notify("cancelled", gen=gen)
         except AuthError as e:
             log.error("Authentication failed: %s", e)
-            self._set_state(BotState.ERROR, "Server rejected the BMO credential", gen)
+            self.notify("auth_failed", gen=gen)
+        except ServerBusy as e:
+            log.warning("Server busy: %s", e.code)
+            self.notify(SERVER_CODES.get(e.code, "server_switching"), gen=gen,
+                        server_message=e.display_message)
+        except ReservationTimeout as e:
+            log.error("Readiness timeout: %s", e)
+            self.notify("gpu_wait_timeout", gen=gen)
         except ServerUnavailable as e:
             log.error("Server unavailable: %s", e)
-            self._set_state(BotState.ERROR, "Can't reach the BMO server", gen)
-        except Exception as e:
+            self.notify("server_unreachable", gen=gen)
+        except Exception:
             log.exception("Interaction failed")
-            self._set_state(BotState.ERROR, f"Something went wrong: {e}", gen)
+            self.notify("unknown", gen=gen)
 
     # --------------------------------------------------------------- shutdown
     def shutdown(self) -> None:
