@@ -36,6 +36,11 @@ summary{cursor:pointer;font-weight:600}
 #composer textarea{width:100%;resize:none;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--bg)}
 #login{max-width:320px;margin:20vh auto;padding:16px;text-align:center}
 #login input{width:100%;font-size:1.5rem;text-align:center;letter-spacing:.3em;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--card);margin:12px 0}
+.memlist{list-style:none;margin:8px 0;padding:0}
+.memlist li{display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--line)}
+.memlist li span{flex:1;word-break:break-word}
+.memlist button{padding:2px 10px;font-size:.85rem}
+.muted{color:var(--muted);font-size:.9rem}
 dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:8px 0}
 dd{margin:0;word-break:break-word}
 </style>
@@ -69,6 +74,17 @@ dd{margin:0;word-break:break-word}
     <div class="row"><label for="s-snd">Sound effects</label><input id="s-snd" type="checkbox"></div>
     <div class="row"><label for="s-gain">Mic boost <span id="s-gain-v"></span> dB</label><input id="s-gain" type="range" min="0" max="30" step="3"></div>
     <div id="setErr" class="err"></div>
+  </details>
+
+  <details id="memoryPanel">
+    <summary>Memory</summary>
+    <div class="row hidden" id="memToggleRow"><label for="s-mem">BMO remembers things</label><input id="s-mem" type="checkbox"></div>
+    <p id="convCount" class="muted"></p>
+    <ul id="memList" class="memlist"></ul>
+    <p id="memEmpty" class="muted"></p>
+    <div class="row"><button id="forget" class="ghost" type="button">Forget everything</button></div>
+    <div id="memMsg" class="muted" role="status"></div>
+    <div id="memErr" class="err"></div>
   </details>
 
   <details id="serverPanel">
@@ -118,6 +134,9 @@ function applySettings(s){
   $("s-cam").value=s["camera.vision_mode"];
   $("s-snd").checked=!!s["sounds.enabled"];
   $("s-gain").value=s["microphone.gain_db"];$("s-gain-v").textContent=s["microphone.gain_db"];
+  var hasMem=Object.prototype.hasOwnProperty.call(s,"memory.enabled");
+  $("memToggleRow").classList.toggle("hidden",!hasMem);
+  if(hasMem)$("s-mem").checked=!!s["memory.enabled"];
   if(!speakTouched)$("speak").checked=!s["ui.text_only"];
 }
 function init(){
@@ -201,6 +220,50 @@ $("s-snd").addEventListener("change",function(){post("sounds.enabled",this.check
 $("s-gain").addEventListener("input",function(){$("s-gain-v").textContent=this.value});
 $("s-gain").addEventListener("change",function(){post("microphone.gain_db",parseFloat(this.value))});
 
+$("s-mem").addEventListener("change",function(){post("memory.enabled",this.checked)});
+
+function loadMemories(){
+  return api("GET","/api/memories").then(function(r){
+    if(!r.ok){$("memErr").textContent=r.data.error||"Could not load memory";return}
+    $("memErr").textContent="";
+    var conv=r.data.conversation||[], lt=r.data.long_term||{}, list=$("memList");
+    var n=conv.length;
+    $("convCount").textContent="This conversation: "+n+" message"+(n===1?"":"s");
+    list.textContent="";
+    var mems=lt.available?(lt.memories||[]):[];
+    mems.forEach(function(m){
+      var li=document.createElement("li");
+      var sp=document.createElement("span");sp.textContent=m.content;
+      var b=document.createElement("button");b.type="button";b.className="ghost";
+      b.textContent="Delete";b.setAttribute("aria-label","Delete memory");
+      b.addEventListener("click",function(){
+        api("POST","/api/memories/delete",{id:m.id}).then(function(d){
+          $("memErr").textContent=d.ok?"":(d.data.error||"Could not delete");
+          loadMemories();
+        });
+      });
+      li.appendChild(sp);li.appendChild(b);list.appendChild(li);
+    });
+    $("memEmpty").textContent=!lt.available?"Long-term memory isn't set up on the server yet.":
+      (mems.length?"":"BMO doesn't remember anything yet.");
+  });
+}
+$("forget").addEventListener("click",function(){
+  if(!confirm("Forget everything? BMO will lose this conversation and its long-term memories."))return;
+  api("POST","/api/memories/forget",{}).then(function(r){
+    var d=r.data||{};
+    if(!r.ok||d.server==="error"){
+      $("memMsg").textContent="";
+      $("memErr").textContent=r.ok?"Forgot this conversation, but the server could not clear long-term memory.":(d.error||"Could not forget");
+    }else{
+      $("memErr").textContent="";
+      $("memMsg").textContent=d.server==="ok"?"Forgot everything.":"Forgot this conversation; long-term memory isn't available yet.";
+    }
+    loadMemories();
+  });
+});
+$("memoryPanel").addEventListener("toggle",function(){if(this.open)loadMemories()});
+
 function refreshServer(){
   api("GET","/api/status").then(function(r){
     if(!r.ok)return;
@@ -217,7 +280,7 @@ function refreshServer(){
 setInterval(function(){if($("serverPanel").open&&!$("app").classList.contains("hidden"))refreshServer()},10000);
 $("serverPanel").addEventListener("toggle",function(){if(this.open)refreshServer()});
 
-init().then(function(){if($("app").classList.contains("hidden"))showLogin()});
+init().then(function(){if($("app").classList.contains("hidden"))showLogin();else loadMemories()});
 })();
 </script>
 </body>

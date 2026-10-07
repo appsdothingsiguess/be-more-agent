@@ -252,6 +252,8 @@ class _Handler(BaseHTTPRequestHandler):
             st = dict(c.server_status())
             st["bmo_state"] = c.state.value
             return self._json(200, st)
+        if path == "/api/memories":
+            return self._memories()
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -279,6 +281,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True})
         if path == "/api/settings":
             return self._settings(data)
+        if path == "/api/memories/forget":
+            return self._memory_call("forget_memory")
+        if path == "/api/memories/delete":
+            return self._memory_delete(data)
         self._json(404, {"error": "not found"})
 
     def _static(self, rel: str) -> None:
@@ -321,6 +327,24 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "speak must be true, false or null"})
         self.web.controller.submit_text(text.strip(), speak=speak)
         self._json(202, {"ok": True})
+
+    def _memories(self) -> None:
+        c = self.web.controller
+        if not all(callable(getattr(c, n, None)) for n in ("list_memories", "conversation")):
+            return self._json(501, {"error": "memory not supported"})
+        self._json(200, {"long_term": c.list_memories(), "conversation": c.conversation()})
+
+    def _memory_call(self, name: str, *args) -> None:
+        fn = getattr(self.web.controller, name, None)
+        if not callable(fn):
+            return self._json(501, {"error": "memory not supported"})
+        self._json(200, fn(*args))
+
+    def _memory_delete(self, data: dict) -> None:
+        mid = data.get("id")
+        if not isinstance(mid, int) or isinstance(mid, bool) or mid <= 0:
+            return self._json(400, {"error": "id must be a positive integer"})
+        self._memory_call("delete_memory", mid)
 
     def _settings(self, data: dict) -> None:
         if not data:

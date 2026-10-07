@@ -191,3 +191,78 @@ def test_pin_file(tmp_path, caplog):
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
     assert load_or_create_pin(p) == pin
     assert pin not in caplog.text and str(p) in caplog.text
+
+
+class MemController(FakeController):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.forgets = 0
+        self.deleted = []
+
+    def forget_memory(self):
+        self.forgets += 1
+        return {"local_cleared": True, "server": "ok", "forgotten": 2}
+
+    def list_memories(self):
+        return {"available": True, "error": None, "memories": [
+            {"id": 1, "content": "likes tea", "type": "fact", "created_at": "x"}]}
+
+    def delete_memory(self, memory_id):
+        self.deleted.append(memory_id)
+        return {"available": True, "deleted": True}
+
+    def conversation(self):
+        return [{"role": "user", "content": "hi"}]
+
+
+@pytest.fixture
+def memweb(web):
+    web.controller = web.ctrl = MemController(web.cfg)
+    return web
+
+
+MEM_ROUTES = (("get", "/api/memories"), ("post", "/api/memories/forget"),
+              ("post", "/api/memories/delete"))
+
+
+def test_memory_requires_login(memweb):
+    for method, p in MEM_ROUTES:
+        r = getattr(requests, method)(memweb.base + p, **({"json": {"id": 1}} if method == "post" else {}))
+        assert r.status_code == 401, p
+    assert memweb.ctrl.forgets == 0 and memweb.ctrl.deleted == []
+
+
+def test_memory_get(memweb, sess):
+    d = sess.get(memweb.base + "/api/memories").json()
+    assert d["long_term"]["memories"][0]["content"] == "likes tea"
+    assert d["conversation"] == [{"role": "user", "content": "hi"}]
+
+
+def test_memory_forget(memweb, sess):
+    r = sess.post(memweb.base + "/api/memories/forget", json={})
+    assert r.status_code == 200
+    assert r.json() == {"local_cleared": True, "server": "ok", "forgotten": 2}
+    assert memweb.ctrl.forgets == 1
+
+
+def test_memory_delete_validation(memweb, sess):
+    for body in ({}, {"id": "3"}, {"id": True}, {"id": 0}, {"id": -1}, {"id": 1.5}):
+        r = sess.post(memweb.base + "/api/memories/delete", json=body)
+        assert r.status_code == 400, body
+    assert memweb.ctrl.deleted == []
+    r = sess.post(memweb.base + "/api/memories/delete", json={"id": 7})
+    assert r.status_code == 200 and r.json() == {"available": True, "deleted": True}
+    assert memweb.ctrl.deleted == [7]
+
+
+def test_memory_unsupported(web, sess):
+    assert sess.get(web.base + "/api/memories").status_code == 501
+    for p, body in (("forget", {}), ("delete", {"id": 1})):
+        r = sess.post(web.base + "/api/memories/" + p, json=body)
+        assert r.status_code == 501 and r.json() == {"error": "memory not supported"}
+
+
+def test_page_has_memory_section(web):
+    html = requests.get(web.base + "/").text
+    assert 'id="memoryPanel"' in html and 'id="forget"' in html
+    assert "Forget everything" in html
