@@ -1,0 +1,55 @@
+{
+  "server_url": "http://192.168.0.240:8765",
+  "token_file": "/etc/bmo/token",
+  "model": "bmo-qwen3-vl-8b",
+
+  "microphone": {
+    "device": "auto",
+    "match": "USB PnP Sound Device",
+    "fallback_device": "plughw:1,0",
+    "alsa_card": null,
+    "capture_rate": 48000,
+    "upload_rate": 16000,
+    "channels": 1,
+    "gain_db": 18,
+    "set_capture_gain": true,
+    "auto_gain_control": true
+  },
+
+  "speaker": {
+    "device": "auto",
+    "match": "UACDemoV1.0",
+    "fallback_device": "plughw:2,0"
+  },
+
+  "camera": {
+    "enabled": true,
+    "width": 640,
+    "height": 480,
+    "rotation": 0,
+    "vision_mode": "always"
+  },
+
+  "ui": {
+    "enabled": true,
+    "width": 800,
+    "height": 480,
+    "fullscreen": true
+  },
+
+  "sounds": {
+    "enabled": true,
+    "greeting": true,
+    "ack": true,
+    "thinking": true
+  },
+
+  "input": {
+    "evdev_enabled": true,
+    "evdev_device": "auto"
+  },
+
+  "wake_word": {
+    "enabled": false
+  }
+}
