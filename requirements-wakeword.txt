@@ -1,3 +1,11 @@
-# Optional on-device wake word (disabled by default in config).
-openwakeword
-onnxruntime
+# On-device wake word + voice activity detection (wake_word.enabled / microphone.backend=stream).
+# openwakeword's metadata requires tflite-runtime, which has no Python 3.13 wheel; we use its
+# ONNX backend instead, so install it without dependencies:
+#   venv/bin/pip install -r requirements-wakeword.txt
+#   venv/bin/pip install --no-deps openwakeword==0.6.0
+#   venv/bin/python -c "import openwakeword.utils as u; u.download_models(model_names=['hey_jarvis'])"
+numpy==2.5.3
+scipy==1.18.1
+scikit-learn==1.9.1
+tqdm==4.70.1
+onnxruntime==1.30.0
