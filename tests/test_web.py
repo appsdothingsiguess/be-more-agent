@@ -1,8 +1,10 @@
+import io
 import logging
 import queue
 import stat
 import threading
 import time
+import wave
 from collections import deque
 from types import SimpleNamespace
 
@@ -25,6 +27,25 @@ class FakeController:
         self.applied = []
         self.interrupts = 0
         self.subs = []
+        self.audio_calls = []
+        self.audio_seen = []
+        self.audio_result = "a1b2c3d4e5f60718"
+        self.text_calls = []
+        self.replies = {}
+        self.sticky = [{"type": "phase", "phase": "idle", "turn": None, "message": "ready"},
+                       {"type": "live", "armed": True, "model": "hey_jarvis", "error": None}]
+
+    def snapshot(self):
+        return list(self.sticky)
+
+    def reply_path(self, turn_id):
+        return self.replies.get(turn_id)
+
+    def submit_audio(self, path, *, speak=None, play_on_pi=None, source="web", client_id=None):
+        import os
+        self.audio_seen.append(os.path.exists(path) and oct(os.stat(path).st_mode & 0o777))
+        self.audio_calls.append((path, speak, play_on_pi, source, client_id))
+        return self.audio_result
 
     def subscribe(self, fn):
         self.subs.append(fn)
@@ -34,8 +55,10 @@ class FakeController:
         for fn in list(self.subs):
             fn(ev)
 
-    def submit_text(self, text, speak=None):
+    def submit_text(self, text, speak=None, *, play_on_pi=None, source="web", client_id=None):
         self.messages.append((text, speak))
+        self.text_calls.append((text, speak, play_on_pi, source, client_id))
+        return "0123456789abcdef"
 
     def interrupt(self):
         self.interrupts += 1
@@ -53,6 +76,9 @@ def web(tmp_path):
     cfg = Config()
     cfg.web.host = "127.0.0.1"
     cfg.web.port = 0
+    cfg.runtime_dir = str(tmp_path / "rt")
+    cfg.web.trusted_proxies = ["10.9.9.9"]
+    cfg.web.public_origins = ["https://bmo.example.com"]
     ctrl = FakeController(cfg)
     srv = WebServer(cfg, ctrl, pin=PIN)
     srv.start()
@@ -148,6 +174,7 @@ def test_status_and_interrupt(web, sess):
 
 
 def test_sse(web, sess):
+    web.ctrl.sticky = [{"type": "state", "state": "idle", "message": ""}]
     with sess.get(web.base + "/api/events", stream=True, timeout=5) as r:
         assert r.headers["Content-Type"].startswith("text/event-stream")
         lines = r.iter_lines(chunk_size=1, decode_unicode=True)
@@ -266,3 +293,173 @@ def test_page_has_memory_section(web):
     html = requests.get(web.base + "/").text
     assert 'id="memoryPanel"' in html and 'id="forget"' in html
     assert "Forget everything" in html
+
+
+# -- W2 additions ---------------------------------------------------------
+def wav(rate=16000, secs=1.0, width=2, ch=1):
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(ch)
+        w.setsampwidth(width)
+        w.setframerate(rate)
+        w.writeframes(b"\0" * int(rate * secs) * width * ch)
+    return buf.getvalue()
+
+
+def post_voice(sess, web, body, ctype="audio/wav", q=""):
+    return sess.post(web.base + "/api/voice" + q, data=body, headers={"Content-Type": ctype})
+
+
+def test_voice_happy(web, sess):
+    r = post_voice(sess, web, wav(), q="?speak=1&pi=0&client=abcdEFGH12")
+    assert r.status_code == 202 and r.json() == {"turn": "a1b2c3d4e5f60718"}
+    path, speak, pi, source, client = web.ctrl.audio_calls[0]
+    assert (speak, pi, source, client) == (True, False, "web", "abcdEFGH12")
+    assert web.ctrl.audio_seen == ["0o600"]
+    assert path.parent == web.cfg.runtime_path / "uploads"
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+def test_voice_defaults_and_alt_type(web, sess):
+    assert post_voice(sess, web, wav(), "audio/x-wav").status_code == 202
+    assert web.ctrl.audio_calls[0][1:] == (None, None, "web", None)
+
+
+def test_voice_unauth(web):
+    r = requests.post(web.base + "/api/voice", data=wav(), headers={"Content-Type": "audio/wav"})
+    assert r.status_code == 401 and not web.ctrl.audio_calls
+
+
+def test_voice_too_large_and_type(web, sess):
+    web.cfg.web.max_voice_bytes = 1000
+    assert post_voice(sess, web, wav()).status_code == 413
+    web.cfg.web.max_voice_bytes = 3_000_000
+    time.sleep(1.1)
+    assert post_voice(sess, web, wav(), "text/plain").status_code == 415
+    assert not web.ctrl.audio_calls
+
+
+@pytest.mark.parametrize("kw", [dict(ch=2), dict(width=3), dict(secs=0.1), dict(secs=31),
+                                dict(rate=4000)])
+def test_voice_rejects_bad_wav(web, sess, kw):
+    assert post_voice(sess, web, wav(**kw)).status_code == 400
+    assert not web.ctrl.audio_calls
+
+
+def test_voice_garbage_and_none(web, sess):
+    assert post_voice(sess, web, b"not a wav").status_code == 400
+    time.sleep(1.1)
+    web.ctrl.audio_result = None
+    assert post_voice(sess, web, wav()).status_code == 503
+
+
+def test_voice_rate_limit(web, sess):
+    assert post_voice(sess, web, wav()).status_code == 202
+    assert post_voice(sess, web, wav()).status_code == 429
+    time.sleep(1.1)
+    assert post_voice(sess, web, wav()).status_code == 202
+
+
+def test_audio_route(web, sess):
+    f = web.cfg.runtime_path / "r.wav"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(wav())
+    web.ctrl.replies["00112233445566ff"] = f
+    r = sess.get(web.base + "/api/audio/00112233445566ff.wav")
+    assert r.status_code == 200 and r.content == wav()
+    assert r.headers["Content-Type"] == "audio/wav" and r.headers["Cache-Control"] == "no-store"
+    for bad in ("0011.wav", "00112233445566fe.wav", "..%2f..%2fetc%2fpasswd", "00112233445566FF.wav",
+                "../00112233445566ff.wav"):
+        assert sess.get(web.base + "/api/audio/" + bad).status_code == 404
+    assert requests.get(web.base + "/api/audio/00112233445566ff.wav").status_code == 401
+
+
+def test_security_headers(web):
+    r = requests.get(web.base + "/")
+    csp = r.headers["Content-Security-Policy"]
+    assert "media-src 'self' blob:" in csp and "connect-src 'self'" in csp
+    assert "worker-src 'self'" in csp
+    assert r.headers["Permissions-Policy"] == "microphone=(self), camera=()"
+    assert r.headers["Referrer-Policy"] == "same-origin"
+    js = requests.get(web.base + "/static/app.js")
+    if js.status_code == 200:
+        assert js.headers["Content-Type"].startswith("application/javascript")
+
+
+def test_sse_snapshot_first_and_status_live(web, sess):
+    with sess.get(web.base + "/api/events", stream=True, timeout=5) as r:
+        lines = r.iter_lines(chunk_size=1)
+        first = next(l for l in lines if l.startswith(b"data:"))
+        assert b'"phase"' in first
+    live = sess.get(web.base + "/api/status").json()["live"]
+    assert live["type"] == "live" and live["armed"] is True
+
+
+def test_sse_cap(web, sess):
+    streams = [sess.get(web.base + "/api/events", stream=True, timeout=5) for _ in range(8)]
+    try:
+        assert all(s.status_code == 200 for s in streams)
+        assert sess.get(web.base + "/api/events", timeout=5).status_code == 503
+    finally:
+        for s in streams:
+            s.close()
+
+
+def test_message_turn_and_flags(web, sess):
+    r = sess.post(web.base + "/api/message",
+                  json={"text": "hi", "play_on_pi": False, "client_id": "abcdEFGH12"})
+    assert r.status_code == 202 and r.json() == {"ok": True, "turn": "0123456789abcdef"}
+    assert web.ctrl.text_calls[-1] == ("hi", None, False, "web", "abcdEFGH12")
+    assert sess.post(web.base + "/api/message",
+                     json={"text": "hi", "client_id": "../x"}).status_code == 400
+    assert sess.post(web.base + "/api/message",
+                     json={"text": "hi", "play_on_pi": "yes"}).status_code == 400
+
+
+def test_xff_untrusted_peer_ignored(web):
+    h = {"X-Forwarded-For": "1.2.3.4", "CF-Connecting-IP": "5.6.7.8"}
+    for i in range(5):
+        requests.post(web.base + "/api/login", json={"pin": "0"}, headers=
+                      {"X-Forwarded-For": f"1.2.3.{i}"})
+    # all counted against the real peer, so now locked regardless of header
+    r = requests.post(web.base + "/api/login", json={"pin": PIN}, headers=h)
+    assert r.status_code == 429
+
+
+def test_client_ip_trusted(web):
+    web.cfg.web.trusted_proxies = ["127.0.0.1"]
+    web._proxies = [__import__("ipaddress").ip_network("127.0.0.1")]
+    for i in range(5):
+        requests.post(web.base + "/api/login", json={"pin": "0"},
+                      headers={"X-Forwarded-For": "9.9.9.9, 1.1.1.1, 127.0.0.1"})
+    assert requests.post(web.base + "/api/login", json={"pin": PIN},
+                         headers={"X-Forwarded-For": "9.9.9.9, 1.1.1.2"}).status_code == 200
+    assert requests.post(web.base + "/api/login", json={"pin": PIN},
+                         headers={"X-Forwarded-For": "1.1.1.1"}).status_code == 429
+    assert requests.post(web.base + "/api/login", json={"pin": PIN},
+                         headers={"CF-Connecting-IP": "7.7.7.7"}).status_code == 200
+
+
+def test_global_lockout(web, caplog):
+    web._proxies = [__import__("ipaddress").ip_network("127.0.0.1")]
+    with caplog.at_level(logging.WARNING):
+        for i in range(30):
+            requests.post(web.base + "/api/login", json={"pin": "0"},
+                          headers={"CF-Connecting-IP": f"8.8.{i // 250}.{i % 250 + 1}"})
+    r = requests.post(web.base + "/api/login", json={"pin": PIN},
+                      headers={"CF-Connecting-IP": "4.4.4.4"})
+    assert r.status_code == 429
+    assert any("Global login lockout" in m for m in caplog.messages)
+
+
+def test_origin_check(web, sess):
+    url = web.base + "/api/message"
+    bad = sess.post(url, json={"text": "x"}, headers={"Origin": "http://evil.example"})
+    assert bad.status_code == 403
+    ok = sess.post(url, json={"text": "x"}, headers={"Origin": web.base})
+    assert ok.status_code == 202
+    ok = sess.post(url, json={"text": "x"}, headers={"Origin": "https://bmo.example.com"})
+    assert ok.status_code == 202
+    r = requests.post(web.base + "/api/login", json={"pin": PIN},
+                      headers={"Origin": "http://evil.example"})
+    assert r.status_code == 403
