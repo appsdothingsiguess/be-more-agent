@@ -25,6 +25,15 @@ from app.server.errors import (
 
 log = logging.getLogger(__name__)
 
+EMOTIONS = frozenset({"neutral", "happy", "excited", "sad", "surprised", "confused", "angry",
+                      "sleepy", "thinking", "blank", "kiss", "dizzy", "straining",
+                      "awestruck", "chewing"})
+
+
+def clean_emotion(value) -> str:
+    """The server's face choice, or neutral if missing/odd (older servers send none)."""
+    return value if isinstance(value, str) and value in EMOTIONS else "neutral"
+
 
 @dataclass(frozen=True)
 class InteractResult:
@@ -34,6 +43,7 @@ class InteractResult:
     model: str | None
     audio_wav: bytes | None
     raw: dict
+    emotion: str = "neutral"   # one of EMOTIONS; anything else becomes neutral
 
 
 class BMOClient:
@@ -230,6 +240,7 @@ class BMOClient:
             model=raw.get("model"),
             audio_wav=audio,
             raw=raw,
+            emotion=clean_emotion(raw.get("emotion")),
         )
 
     # -- long-term memory (404 = server has no memory routes) --------------

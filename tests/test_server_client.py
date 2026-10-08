@@ -192,3 +192,23 @@ def test_memory_routes_other_errors_raise(client, server):
     server.auth_mode_401 = True
     with pytest.raises(AuthError):
         client.list_memories()
+
+
+@pytest.mark.parametrize("sent,expected", [
+    ("excited", "excited"), ("chewing", "chewing"), (None, "neutral"), ("", "neutral"),
+    ("furious", "neutral"), (7, "neutral"), (["happy"], "neutral")])
+def test_emotion_field_is_validated(server, client, sent, expected):
+    server.interact_extra = {"emotion": sent}
+    assert client.interact(text="hi").emotion == expected
+
+
+def test_missing_emotion_from_older_server_is_neutral(client):
+    assert client.interact(text="hi").emotion == "neutral"
+
+
+def test_all_server_emotions_exist_as_faces():
+    from app.server.client import EMOTIONS
+    from app.ui.face import emotion_names
+    from app.ui.face_svg import load_faces
+    faces = load_faces("faces_svg")
+    assert EMOTIONS - {"neutral"} <= set(faces) and set(emotion_names(faces)) <= EMOTIONS

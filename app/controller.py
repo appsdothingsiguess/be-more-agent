@@ -461,6 +461,9 @@ class InteractionController:
             if self.last_transcript:
                 self._show(self.last_transcript, "user")
             self._show(result.text, "bmo")
+            set_emotion = getattr(self.ui, "set_emotion", None)
+            if set_emotion is not None:
+                set_emotion(result.emotion)     # the face keeps it while BMO talks
 
             if speak and result.audio_wav:
                 reply = Path(self.cfg.runtime_path) / f"reply-{gen}.wav"
