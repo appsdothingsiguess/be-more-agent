@@ -219,7 +219,7 @@ def test_followup_speech_is_sent():
 
 
 def test_no_followup_for_web_failed_silent_or_disabled():
-    for ev, edit in [(done(source="web"), None), (done(ok=False), None),
+    for ev, edit in [(done(source="web"), None), (done(ok=False), None), (done(goodbye=True), None),
                      (done(spoke_on_pi=False), None), (done(), "off")]:
         r = Rig()
         if edit:

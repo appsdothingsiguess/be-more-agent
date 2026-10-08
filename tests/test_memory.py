@@ -4,7 +4,7 @@ import os
 import pytest
 
 from app.memory import (ConversationMemory, ConversationSession, is_forget_command,
-                        is_new_session_command)
+                        is_goodbye, is_new_session_command)
 
 
 def test_missing_file_is_empty(tmp_path):
@@ -173,3 +173,16 @@ def test_new_session_command_matches(text):
                                   "forget everything", "start overnight"])
 def test_new_session_command_rejects(text):
     assert not is_new_session_command(text)
+
+
+@pytest.mark.parametrize("text", ["Goodbye!", "bye BMO", "Okay, thanks BMO. Bye!", "That's all for now.",
+                                  "See you later, BMO", "Good night!", "thank you, that's it",
+                                  "Alright bye bye"])
+def test_goodbye_matches(text):
+    assert is_goodbye(text)
+
+
+@pytest.mark.parametrize("text", ["", "thank you", "how do you say goodbye in french",
+                                  "bye the way what time is it", "say goodbye to grandma", "okay"])
+def test_goodbye_rejects(text):
+    assert not is_goodbye(text)

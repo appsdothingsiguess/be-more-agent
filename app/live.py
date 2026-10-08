@@ -168,7 +168,7 @@ class LiveListener:
                 if key == "wake_word.enabled" or key.startswith("listen.followup"):
                     self._dirty = True
             elif (ev.get("ok") and ev.get("spoke_on_pi") and ev.get("source") != "web"
-                  and self.cfg.listen.followup):
+                  and not ev.get("goodbye") and self.cfg.listen.followup):
                 self._followup_pending = True
                 if self._mode != MUTED:  # speech already over: just the tail
                     self._mode, self._mute_until = MUTED, None

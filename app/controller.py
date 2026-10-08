@@ -16,7 +16,8 @@ Event feed (dicts passed to subscribers, each also carries "time"). Schema:
                phase: starting|idle|listening|looking|thinking|waiting_gpu|speaking|error
   audio      {turn, url: "/api/audio/<id>.wav", client_id, source, duration}
                emitted when a reply WAV is saved, before any Pi playback
-  turn_done  {turn, source, client_id, ok, spoke_on_pi}   once per turn, also on interrupt
+  turn_done  {turn, source, client_id, ok, spoke_on_pi, goodbye}   once per turn, also on interrupt;
+               goodbye = the user said farewell: no follow-up, session ends
   live       {armed, model, error, ...}           published by others via publish(); sticky
   setting    {key, value}                         after a live setting is applied
   session    {id, reason, consolidated}           a conversation session ended and a fresh one
@@ -45,7 +46,7 @@ from app.config import Config
 from app.hardware.camera import CameraError
 from app.hardware.input import Action
 from app.memory import (ConversationMemory, ConversationSession, is_forget_command,
-                        is_new_session_command, iso, write_json_atomic)
+                        is_goodbye, is_new_session_command, iso, write_json_atomic)
 from app.replies import ReplyStore
 from app.notify import ERRORS, NOTICES, SERVER_CODES, SOFT, clip_path
 from app.server.errors import (AuthError, BadResponse, BMOError, RequestCancelled,
@@ -77,6 +78,7 @@ class Turn:
     speak: bool
     play_on_pi: bool
     done: bool = False
+    goodbye: bool = False
 
 
 class InteractionController:
@@ -745,7 +747,12 @@ class InteractionController:
             if self._turn is turn:
                 self._turn = None
         self._emit({"type": "turn_done", "turn": turn.id, "source": turn.source,
-                    "client_id": turn.client_id, "ok": ok, "spoke_on_pi": spoke})
+                    "client_id": turn.client_id, "ok": ok, "spoke_on_pi": spoke,
+                    "goodbye": turn.goodbye})
+        if turn.goodbye and ok:
+            # Conversation over: save it to long-term memory and start fresh for next time.
+            threading.Thread(target=self.end_session, args=("goodbye",),
+                             name="bmo-session", daemon=True).start()
 
     @staticmethod
     def _wav_duration(data: bytes) -> float | None:
@@ -825,6 +832,7 @@ class InteractionController:
                 return
             self.reservation.renewed()
             end_session = bool(result.transcript) and is_new_session_command(result.transcript)
+            turn.goodbye = not end_session and is_goodbye(result.transcript or text or "")
             if not end_session:
                 self._remember(result, text, use_memory, epoch)
 

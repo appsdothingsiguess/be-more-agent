@@ -49,6 +49,30 @@ def is_new_session_command(text: str) -> bool:
     return " ".join(words) in _NEW_SESSION_PHRASES
 
 
+_GOODBYE_PHRASES = frozenset((
+    "bye", "bye bye", "goodbye", "good bye", "bye for now", "see you", "see ya", "see you later",
+    "see you soon", "see you tomorrow", "talk to you later", "talk later", "later", "catch you later",
+    "good night", "goodnight", "night night", "that s all", "that is all", "that s all for now",
+    "that will be all", "that ll be all", "i m done", "we re done", "all done", "stop listening",
+    "go to sleep", "nothing else", "that s it", "that s it for now"))
+_GOODBYE_FILLER = frozenset(("hey", "bmo", "beemo", "okay", "ok", "alright", "all", "right", "well",
+                             "thanks", "thank", "you", "so", "for", "now", "then", "please", "buddy"))
+
+
+def is_goodbye(text: str) -> bool:
+    """True when the whole utterance is a farewell ("Thanks BMO, goodbye!", "that's all for now")."""
+    words = _PUNCT.sub(" ", text.lower()).split()
+    if " ".join(words) in _GOODBYE_PHRASES:
+        return True
+    # Peel filler words off both ends ("okay thanks bmo ... bye", "bye bmo"), then match.
+    for _ in range(2):
+        while words and words[0] in _GOODBYE_FILLER and " ".join(words) not in _GOODBYE_PHRASES:
+            words = words[1:]
+        while words and words[-1] in _GOODBYE_FILLER and " ".join(words) not in _GOODBYE_PHRASES:
+            words = words[:-1]
+    return bool(words) and " ".join(words) in _GOODBYE_PHRASES
+
+
 def iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
 

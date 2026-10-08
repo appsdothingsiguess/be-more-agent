@@ -1063,3 +1063,30 @@ def test_spoken_new_session_command(rig):
     assert rig.client.consolidated[0]["session_id"] == old
     assert len(rig.client.consolidated[0]["messages"]) == 2     # the command was not stored
     assert rig.ctl.conversation() == []
+
+
+def test_goodbye_ends_session_without_followup(rig):
+    run_text(rig, "earlier")
+    orig = rig.client.interact
+
+    def interact(**kw):
+        r = orig(**kw)
+        r.transcript = "Okay, thanks BMO. Bye!"
+        return r
+    rig.client.interact = interact
+    old = rig.ctl.session.id
+    done, got = [], events_of(rig)
+    rig.ctl.subscribe(lambda e: done.append(e) if e["type"] == "turn_done" else None)
+    run_text(rig, "x")
+    wait_for(lambda: got)
+    assert done[-1]["goodbye"] is True
+    assert got[0]["reason"] == "goodbye"
+    assert rig.client.consolidated[0]["session_id"] == old
+    assert len(rig.client.consolidated[0]["messages"]) == 4     # the farewell is part of the session
+
+
+def test_normal_turn_is_not_goodbye(rig):
+    done = []
+    rig.ctl.subscribe(lambda e: done.append(e) if e["type"] == "turn_done" else None)
+    run_text(rig, "what is a goodbye in french")
+    assert done[-1]["goodbye"] is False and not rig.client.consolidated
