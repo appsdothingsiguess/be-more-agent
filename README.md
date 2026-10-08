@@ -79,12 +79,17 @@ Edit `config.json` (copied from `config.example.json`). Any subset of keys overr
 | `ui.face_style`, `.faces_svg_dir` | `svg`, `faces_svg` | `svg` = animated vector face; `png` = the old still frames in `faces/` |
 | `ui.text_only` | `false` | Mute: replies and errors are text only, nothing is played |
 | `web.enabled`, `.port`, `.pin_file` | `true`, `8080`, `~/.config/bmo/web_pin` | Local web page |
+| `web.tls`, `.tls_port`, `.http_redirect` | `off`, `8443`, `true` | `self_signed` (cert made on the Pi) or `files` (`.cert_file`/`.key_file`, e.g. Let's Encrypt). With TLS on, port 8080 only redirects |
+| `web.trusted_proxies`, `.public_origins`, `.tls_hostnames` | `[]` | For serving behind a reverse proxy / a domain later |
 | `sounds.*` | all `true` | Greeting, ack and thinking sounds |
 | `input.evdev_enabled`, `.evdev_device` | `true`, `auto` | Read HID keyboards from `/dev/input` |
-| `wake_word.enabled` | `false` | Optional OpenWakeWord |
+| `wake_word.enabled`, `.model`, `.custom_model`, `.threshold` | `false`, `hey_jarvis`, `models/hey_bmo.onnx`, `0.5` | Hands-free wake word (openWakeWord, runs on the Pi). The custom model is used when the file exists |
+| `microphone.backend` | `auto` | `stream` = one always-on capture shared by wake word, auto-stop and recording (auto picks it when the wake-word packages are installed); `file` = the old press-to-start/press-to-stop recording |
+| `listen.end_silence_seconds`, `.no_speech_timeout` | `0.9`, `6` | Auto-stop after this much silence; give up if nobody speaks |
+| `listen.followup`, `.followup_seconds` | `true`, `5` | After BMO answers out loud, listen again briefly without the wake word |
 | `memory.enabled`, `.max_messages`, `.max_chars` | `true`, `10`, `6000` | Conversation memory: recent exchanges (saved to `runtime/memory.json`) are sent with each turn, and the server's long-term recall is used. Saying or typing "forget everything" wipes both |
 
-Settings changed from the web page (volume, mute, camera mode, sound effects, mic boost, memory) are saved to `runtime/settings.json` and override `config.json` at the next start.
+Settings changed from the web page (volume, mute, camera mode, sound effects, mic boost, memory, wake word, follow-up) are saved to `runtime/settings.json` and override `config.json` at the next start.
 
 Environment overrides: `BMO_SERVER_URL` (or `BMO_URL`), `BMO_MIC_DEVICE`, `BMO_SPEAKER_DEVICE`, `BMO_MIC_GAIN_DB`.
 
@@ -159,17 +164,22 @@ BMO remembers the last few exchanges. After every successful turn the Pi saves t
 
 ## Web page
 
-While BMO runs (`--headless` or `--gui`), it serves a page on port 8080: `http://<pi-address>:8080` (this Pi: `http://192.168.0.218:8080`) from any device on the home network. It offers:
+While BMO runs (`--headless` or `--gui`), it serves a page from any device on the home network. With `web.tls` on it is `https://192.168.0.218:8443` (port 8080 redirects there); otherwise `http://192.168.0.218:8080`. It offers:
 
-* a text chat with BMO, with a "Speak reply" toggle that follows the mute setting
-* live state, errors and "waiting for the server" notices
-* settings: volume, mute (text only), camera mode, sound effects, mic boost
-* a server panel: reachable, ready, mode, queue, last error
-* a Memory section: on/off toggle, this conversation's message count, the facts BMO remembers long-term (each can be deleted), and a "Forget everything" button
+* **Talk:** a mic button (tap, speak, it stops by itself when you pause) and a text box. Browsers only allow the mic over HTTPS, so turn on `web.tls`.
+* **Reply audio, per device:** This device / BMO / Both / Text only, remembered by each browser. Wake-word replies never play on phones.
+* **Progress indicator:** what BMO is actually doing (listening, looking, thinking, getting the GPU ready, talking, playing here).
+* **Settings sheet (gear):** reply audio, BMO's speaker, listening (wake word, follow-up, mic boost), camera, memory (list, delete, forget everything), server status, log out.
 
-**PIN.** The first start creates a 6-digit PIN in `~/.config/bmo/web_pin` (mode 600). Read it with `cat ~/.config/bmo/web_pin`; delete the file to get a new one. After 5 wrong PINs, that device is locked out for 5 minutes.
+**HTTPS.** `"tls": "self_signed"` makes a certificate in `~/.config/bmo/tls/` naming this Pi's hostnames and addresses (remade if the address changes). Each browser shows a warning once; accept it. A real certificate (e.g. for a joeyspace.dev name) goes in with `"tls": "files"`.
 
-**What it exposes.** The page talks only to the Pi; the server credential never reaches the browser. There is no HTTPS, so keep it on your home network. Turn it off with `"web": {"enabled": false}`.
+**PIN.** The first start creates a 6-digit PIN in `~/.config/bmo/web_pin` (mode 600). Read it with `cat ~/.config/bmo/web_pin`; delete the file to get a new one. After 5 wrong PINs a device is locked out for 5 minutes; 30 wrong PINs in an hour from anywhere lock logins for 15 minutes.
+
+**What it exposes.** The page talks only to the Pi; the server credential never reaches the browser. Anyone logged in can talk through BMO's speaker, use its camera and read its memories, so keep it on your home network (or behind an extra login such as Cloudflare Access) and use a long passphrase as the PIN before putting it on the internet. Turn it off with `"web": {"enabled": false}`.
+
+## Hands-free listening
+
+With `wake_word.enabled` (web page toggle) BMO listens for the wake phrase ("Hey Jarvis" until `models/hey_bmo.onnx` exists), records until you stop talking, answers, then listens about 5 s for a follow-up without the wake phrase. It never listens to itself: detection pauses while BMO thinks or plays any sound. Start still works and also stops on silence. Tune the threshold with `./venv/bin/python tools/wake_test.py` (stop the service first; only one program can use the mic). Packages: `requirements-wakeword.txt`.
 
 ## Device detection
 
