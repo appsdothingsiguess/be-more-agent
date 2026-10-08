@@ -84,3 +84,16 @@ def test_memory_enabled_setting(tmp_path):
     assert cfg.memory.enabled is False
     with pytest.raises(SettingError):
         set_setting(cfg, "memory.enabled", "off")
+
+
+def test_wake_and_followup_settings(tmp_path):
+    cfg = make_cfg(tmp_path)
+    assert set_setting(cfg, "wake_word.enabled", True) is True
+    assert set_setting(cfg, "listen.followup", False) is False
+    assert set_setting(cfg, "listen.followup_seconds", "8") == 8.0
+    for key, bad in [("wake_word.enabled", "yes"), ("listen.followup", 1),
+                     ("listen.followup_seconds", 1), ("listen.followup_seconds", 16),
+                     ("listen.followup_seconds", "soon"), ("listen.followup_seconds", True)]:
+        with pytest.raises(SettingError):
+            set_setting(cfg, key, bad)
+    assert current(cfg)["listen.followup_seconds"] == 8.0

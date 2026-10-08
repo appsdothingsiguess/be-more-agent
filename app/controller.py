@@ -6,14 +6,32 @@ interrupted turn is dropped and never played. Interrupt order (per the server
 contract): stop the speaker, invalidate the turn, cancel the server request by
 its X-Request-ID, and re-check readiness before the next inference, because a
 cancel acknowledgement does not mean the GPU is clean yet.
+
+Event feed (dicts passed to subscribers, each also carries "time"). Schema:
+  state      {state, message, turn, source}       UI state; turn/source may be None
+  text       {who: user|bmo, text, turn}          transcript / reply text
+  error      {code, message, hint}                error (also notice for soft codes)
+  notice     {code, message, hint}
+  phase      {phase, turn, source, client_id, message}
+               phase: starting|idle|listening|looking|thinking|waiting_gpu|speaking|error
+  audio      {turn, url: "/api/audio/<id>.wav", client_id, source, duration}
+               emitted when a reply WAV is saved, before any Pi playback
+  turn_done  {turn, source, client_id, ok, spoke_on_pi}   once per turn, also on interrupt
+  live       {armed, model, error, ...}           published by others via publish(); sticky
+  setting    {key, value}                         after a live setting is applied
+``history`` (replayed to new clients) holds only text and error events;
+``snapshot()`` returns the sticky last phase and live events.
 """
 
 from __future__ import annotations
 
+import io
 import logging
 import threading
 import time
+import wave
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,6 +39,7 @@ from app.config import Config
 from app.hardware.camera import CameraError
 from app.hardware.input import Action
 from app.memory import ConversationMemory, is_forget_command
+from app.replies import ReplyStore
 from app.notify import ERRORS, NOTICES, SERVER_CODES, SOFT, clip_path
 from app.server.errors import (AuthError, BadResponse, BMOError, RequestCancelled,
                                ReservationTimeout, ServerBusy, ServerUnavailable)
@@ -29,6 +48,26 @@ from app.ui.states import BotState
 log = logging.getLogger(__name__)
 
 BUSY = (BotState.CAPTURING, BotState.THINKING, BotState.SPEAKING)
+
+LISTEN_SOURCES = ("button", "wake", "followup")
+PHASES = {
+    BotState.WARMUP: "starting", BotState.IDLE: "idle", BotState.LISTENING: "listening",
+    BotState.CAPTURING: "looking", BotState.THINKING: "thinking",
+    BotState.SPEAKING: "speaking", BotState.ERROR: "error",
+}
+HEALTH_BACKOFF = (5.0, 60.0)  # first retry delay, cap (seconds)
+
+
+@dataclass
+class Turn:
+    """Context of one interaction, from submit to turn_done."""
+    id: str
+    gen: int
+    source: str
+    client_id: str | None
+    speak: bool
+    play_on_pi: bool
+    done: bool = False
 
 
 class InteractionController:
@@ -57,6 +96,14 @@ class InteractionController:
         self.history: deque[dict] = deque(maxlen=50)  # recent text/error events
         self._status_cache: tuple[float, dict] | None = None
         self._waiting_announced = False
+        self._turn: Turn | None = None
+        self.listening_source: str | None = None
+        self.idle_hint = "Press Start to talk"
+        self._sticky: dict[str, dict] = {}
+        self._health_thread: threading.Thread | None = None
+        self._health_stop = threading.Event()
+        self.health_backoff = HEALTH_BACKOFF   # tests may shorten it
+        self._prewarming = False
         # Say "waiting for my brain server" while the reservation polls bmo_ready.
         reservation.on_wait = self._on_server_wait
 
@@ -64,6 +111,8 @@ class InteractionController:
         self.memory = ConversationMemory(cfg.runtime_path / cfg.memory.file,
                                          cfg.memory.max_messages, cfg.memory.max_chars)
         self._memory_epoch = 0  # bumped by every clear; a turn started before one is not stored
+        ReplyStore.purge_legacy(cfg.runtime_path)
+        self.replies = ReplyStore(cfg.runtime_path / "replies", keep=8)
 
     # ------------------------------------------------------------------ state
     @property
@@ -85,9 +134,20 @@ class InteractionController:
             else:
                 self._idle.clear()
         log.info("state -> %s %s", state.value, message)
+        turn = None if state in (BotState.WARMUP, BotState.LISTENING) else self._turn
+        turn_id, source, client_id = self._turn_fields(turn, state)
         self.ui.set_state(state, message)
-        self._emit({"type": "state", "state": state.value, "message": message})
+        self._emit({"type": "state", "state": state.value, "message": message,
+                    "turn": turn_id, "source": source})
+        self._emit({"type": "phase", "phase": PHASES[state], "turn": turn_id,
+                    "source": source, "client_id": client_id, "message": message})
         return True
+
+    def _turn_fields(self, turn: Turn | None, state: BotState | None = None):
+        if turn is not None:
+            return turn.id, turn.source, turn.client_id
+        source = self.listening_source if state is BotState.LISTENING else None
+        return None, source, None
 
     # ----------------------------------------------------------------- events
     def subscribe(self, fn: Callable[[dict], None]) -> Callable[[], None]:
@@ -101,10 +161,22 @@ class InteractionController:
                     self._subscribers.remove(fn)
         return unsubscribe
 
+    def publish(self, event: dict) -> None:
+        """Emit an event to every subscriber (live events from other components too)."""
+        self._emit(event)
+
+    def snapshot(self) -> list[dict]:
+        """Sticky events a new client needs: the last phase, then the last live."""
+        with self._lock:
+            return [self._sticky[t] for t in ("phase", "live") if t in self._sticky]
+
     def _emit(self, event: dict) -> None:
         event = {"time": time.time(), **event}
         if event["type"] in ("text", "error"):
             self.history.append(event)
+        if event["type"] in ("phase", "live"):
+            with self._lock:
+                self._sticky[event["type"]] = event
         with self._lock:
             subscribers = list(self._subscribers)
         for fn in subscribers:
@@ -115,7 +187,9 @@ class InteractionController:
 
     def _show(self, text: str, who: str = "bmo") -> None:
         self.ui.show_text(text, who)
-        self._emit({"type": "text", "who": who, "text": text})
+        turn = self._turn
+        self._emit({"type": "text", "who": who, "text": text,
+                    "turn": turn.id if turn else None})
 
     # ------------------------------------------------------------ notifications
     def notify(self, code: str, *, gen: int | None = None, server_message: str = "",
@@ -149,7 +223,11 @@ class InteractionController:
             gen = self._generation
         log.info("Waiting for BMO workers (server state %s, queued %s)",
                  status.get("scheduling_state"), status.get("queued_requests"))
+        turn = self._turn
         self.notify("server_waiting", gen=gen)
+        turn_id, source, client_id = self._turn_fields(turn)
+        self._emit({"type": "phase", "phase": "waiting_gpu", "turn": turn_id, "source": source,
+                    "client_id": client_id, "message": ERRORS["server_waiting"].message})
 
     # --------------------------------------------------------------- settings
     def apply_setting(self, key: str, value: Any) -> Any:
@@ -166,6 +244,7 @@ class InteractionController:
         elif key == "ui.text_only" and value:
             self.speaker.stop()
         save_settings(self.cfg)
+        self.publish({"type": "setting", "key": key, "value": value})
         return value
 
     def server_status(self, max_age: float = 5.0) -> dict:
@@ -209,10 +288,45 @@ class InteractionController:
         except BMOError as e:
             log.warning("Server health check failed: %s", e)
             self.notify("server_unreachable")
+            self._start_health_retry(startup=True)
             return
-        self._set_state(BotState.IDLE, "Press Start to talk")
+        self._set_state(BotState.IDLE, self.idle_hint)
+        self._greet()
+
+    def _greet(self) -> None:
         if not self.cfg.ui.text_only and self.cfg.sounds.enabled and self.cfg.sounds.greeting:
             self.speaker.play_effect("greeting")
+
+    # ----------------------------------------------------------- health retry
+    def _start_health_retry(self, startup: bool = False) -> None:
+        """One daemon thread polls /health with backoff until the server answers."""
+        with self._lock:
+            if self._closed or (self._health_thread is not None and self._health_thread.is_alive()):
+                return
+            t = threading.Thread(target=self._health_loop, args=(startup,),
+                                 name="bmo-health", daemon=True)
+            self._health_thread = t
+        t.start()
+
+    def _health_loop(self, startup: bool) -> None:
+        delay, cap = self.health_backoff
+        while not self._closed:
+            if self._health_stop.wait(delay):
+                return
+            try:
+                self.client.health()
+            except Exception as e:
+                log.info("Server still unreachable: %s", e)
+                delay = min(delay * 2, cap)
+                continue
+            if self._state is not BotState.ERROR:
+                return                      # something else already recovered
+            if self._turn is not None:
+                continue                    # a turn is running; look again shortly
+            self._set_state(BotState.IDLE, "BMO is ready")
+            if startup:
+                self._greet()
+            return
 
     # ---------------------------------------------------------------- actions
     def handle_action(self, action: Action) -> None:
@@ -221,14 +335,14 @@ class InteractionController:
         state = self._state
         if action is Action.START:
             if state in (BotState.IDLE, BotState.ERROR):
-                self._start_listening()
+                self.start_listening("button")
             elif state is BotState.LISTENING:
-                self._finish_listening()
+                self.finish_listening()
             elif state in BUSY:
                 self.interrupt()
         elif action is Action.INTERRUPT:
             if state is BotState.LISTENING:
-                self._abort_listening()
+                self.cancel_listening()
             elif state in BUSY:
                 self.interrupt()
         elif action is Action.B:
@@ -239,23 +353,57 @@ class InteractionController:
         elif action is Action.QUIT:
             self.shutdown()
 
-    def submit_text(self, text: str, speak: bool | None = None) -> None:
-        """Send typed text. speak=None follows the mute setting (ui.text_only)."""
-        text = text.strip()
-        if not text or self._closed:
-            return
+    def _new_turn(self, speak: bool | None, play_on_pi: bool | None, source: str,
+                  client_id: str | None) -> Turn:
+        if speak is None:
+            speak = not self.cfg.ui.text_only
+        if play_on_pi is None:
+            play_on_pi = speak
+        with self._lock:
+            gen = self._generation
+        return Turn(self.replies.new_id(), gen, source, client_id, bool(speak), bool(play_on_pi))
+
+    def _preempt(self) -> None:
         if self._state in BUSY:
             self.interrupt()
         elif self._state is BotState.LISTENING:
-            self._abort_listening()
+            self.cancel_listening()
+
+    def submit_text(self, text: str, speak: bool | None = None, *, play_on_pi: bool | None = None,
+                    source: str = "web", client_id: str | None = None) -> str | None:
+        """Send typed text. speak=None follows the mute setting (ui.text_only);
+        play_on_pi=None follows speak. Returns the turn id, or None if nothing was sent."""
+        text = (text or "").strip()
+        if not text or self._closed:
+            return None
+        self._preempt()
         if is_forget_command(text):
             self._show(text, "user")
             threading.Thread(target=self.forget_memory, name="bmo-forget", daemon=True).start()
             self._show("Okay! BMO forgot everything.", "bmo")
-            return
-        with self._lock:
-            gen = self._generation
-        self._spawn(gen, text=text, speak=speak)
+            return None
+        turn = self._new_turn(speak, play_on_pi, source, client_id)
+        self._spawn(turn, text=text)
+        return turn.id
+
+    def submit_audio(self, path, *, speak: bool | None = None, play_on_pi: bool | None = None,
+                     source: str = "web", client_id: str | None = None) -> str | None:
+        """Send a recorded clip (e.g. from the web page). Takes ownership of `path`:
+        it is deleted when the turn ends."""
+        if self._closed:
+            self._delete(path)
+            return None
+        self._preempt()
+        turn = self._new_turn(speak, play_on_pi, source, client_id)
+        self._spawn(turn, audio=Path(path), own_audio=True)
+        return turn.id
+
+    @staticmethod
+    def _delete(path) -> None:
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("Could not delete %s: %s", path, e)
 
     # ----------------------------------------------------------------- memory
     def _clear_memory(self) -> None:
@@ -316,49 +464,92 @@ class InteractionController:
             self.memory.add_exchange(question, result.text)
 
     # -------------------------------------------------------------- listening
-    def _start_listening(self) -> None:
+    def start_listening(self, source: str = "button") -> bool:
+        """Start recording on the Pi mic. Only from IDLE/ERROR; source is button|wake|followup."""
+        if source not in LISTEN_SOURCES or self._closed:
+            return False
         with self._lock:
+            if self._state not in (BotState.IDLE, BotState.ERROR):
+                return False
             gen = self._generation
+            self.listening_source = source
         try:
             self.mic.start()
         except Exception:
             log.exception("Could not start recording")
+            self.listening_source = None
             self.notify("mic_failed")
-            return
-        self._set_state(BotState.LISTENING, "Listening... press Start when done")
+            return False
+        message = "Listening... press Start when done" if source == "button" else "Listening..."
+        self._set_state(BotState.LISTENING, message)
         timer = threading.Timer(self.cfg.microphone.max_seconds, self._listen_timeout, args=(gen,))
         timer.daemon = True
         self._listen_timer = timer
         timer.start()
+        return True
 
     def _listen_timeout(self, gen: int) -> None:
         if not self._stale(gen) and self._state is BotState.LISTENING:
             log.info("Recording hit max_seconds; submitting")
-            self._finish_listening()
+            self.finish_listening()
 
     def _cancel_listen_timer(self) -> None:
         if self._listen_timer is not None:
             self._listen_timer.cancel()
             self._listen_timer = None
 
-    def _finish_listening(self) -> None:
-        self._cancel_listen_timer()
+    def finish_listening(self) -> None:
+        """Stop recording and send the clip as a turn (no-op unless LISTENING)."""
         with self._lock:
-            gen = self._generation
+            if self._state is not BotState.LISTENING:
+                return
+            self._cancel_listen_timer()
+            source = self.listening_source or "button"
+            speak = not self.cfg.ui.text_only
+            turn = Turn(self.replies.new_id(), self._generation, source, None, speak, speak)
+            self.listening_source = None
+            self._turn = turn
         # Leave LISTENING right away so a double press can't stop twice.
-        self._set_state(BotState.THINKING, "Processing audio...", gen)
-        self._spawn(gen, record=True)
+        self._set_state(BotState.THINKING, "Processing audio...", turn.gen)
+        self._spawn(turn, record=True)
 
-    def _abort_listening(self) -> None:
-        self._cancel_listen_timer()
+    def cancel_listening(self, quiet: bool = False) -> None:
+        """Abort recording. quiet = straight back to IDLE with no "Cancelled" message."""
+        with self._lock:
+            if self._state is not BotState.LISTENING:
+                return
+            self._cancel_listen_timer()
+            self.listening_source = None
         try:
             self.mic.abort()
         except Exception as e:
             log.warning("Microphone abort failed: %s", e)
-        self._set_state(BotState.IDLE, "Cancelled")
+        self._set_state(BotState.IDLE, self.idle_hint if quiet else "Cancelled")
+
+    def prewarm(self) -> None:
+        """Reserve the GPU in the background (e.g. on wake word). Single-flight, never raises."""
+        with self._lock:
+            if self._prewarming or self._closed:
+                return
+            self._prewarming = True
+        threading.Thread(target=self._prewarm_run, name="bmo-prewarm", daemon=True).start()
+
+    def _prewarm_run(self) -> None:
+        try:
+            self.reservation.ensure_ready()
+        except Exception as e:
+            log.info("Prewarm failed: %s", e)
+        finally:
+            self._prewarming = False
+
+    def reply_path(self, turn_id: str) -> Path | None:
+        return self.replies.path(turn_id)
 
     # -------------------------------------------------------------- interrupt
     def interrupt(self) -> None:
+        if self._state is BotState.LISTENING:
+            self.cancel_listening()
+            return
         # 1. Stop physical playback immediately.
         try:
             self.speaker.stop()
@@ -377,13 +568,38 @@ class InteractionController:
                              name="bmo-cancel", daemon=True).start()
         # 4. Readiness is re-checked by the next turn (see _run_turn).
         self._set_state(BotState.IDLE, "Interrupted")
+        turn = self._turn
+        if turn is not None:
+            self._finish_turn(turn, ok=False, spoke=False)
 
     # ------------------------------------------------------------------ turns
-    def _spawn(self, gen: int, *, record: bool = False, text: str | None = None,
-               speak: bool | None = None) -> None:
-        threading.Thread(target=self._run_turn, args=(gen,),
-                         kwargs={"record": record, "text": text, "speak": speak},
-                         name=f"bmo-turn-{gen}", daemon=True).start()
+    def _spawn(self, turn: Turn, *, record: bool = False, text: str | None = None,
+               audio: Path | None = None, own_audio: bool = False) -> None:
+        with self._lock:
+            self._turn = turn
+        threading.Thread(target=self._run_turn, args=(turn,),
+                         kwargs={"record": record, "text": text, "audio": audio,
+                                 "own_audio": own_audio},
+                         name=f"bmo-turn-{turn.gen}", daemon=True).start()
+
+    def _finish_turn(self, turn: Turn, ok: bool, spoke: bool) -> None:
+        """Emit turn_done exactly once per turn and release it."""
+        with self._lock:
+            if turn.done:
+                return
+            turn.done = True
+            if self._turn is turn:
+                self._turn = None
+        self._emit({"type": "turn_done", "turn": turn.id, "source": turn.source,
+                    "client_id": turn.client_id, "ok": ok, "spoke_on_pi": spoke})
+
+    @staticmethod
+    def _wav_duration(data: bytes) -> float | None:
+        try:
+            with wave.open(io.BytesIO(data)) as w:
+                return round(w.getnframes() / w.getframerate(), 3)
+        except (wave.Error, EOFError, ZeroDivisionError):
+            return None
 
     def _want_image(self) -> bool:
         mode = self.cfg.camera.vision_mode
@@ -394,15 +610,14 @@ class InteractionController:
             return armed
         return True
 
-    def _run_turn(self, gen: int, *, record: bool = False, text: str | None = None,
-                  speak: bool | None = None) -> None:
-        if speak is None:
-            speak = not self.cfg.ui.text_only
+    def _run_turn(self, turn: Turn, *, record: bool = False, text: str | None = None,
+                  audio: Path | None = None, own_audio: bool = False) -> None:
+        gen, speak = turn.gen, turn.speak
         with self._lock:
             epoch = self._memory_epoch
         use_memory = self.cfg.memory.enabled
+        ok = spoke = False
         try:
-            audio = None
             if record:
                 audio = self.mic.stop()
                 if self._stale(gen):
@@ -424,7 +639,7 @@ class InteractionController:
 
             if not self._set_state(BotState.THINKING, "Thinking...", gen):
                 return
-            if speak and self.cfg.sounds.enabled and self.cfg.sounds.ack:
+            if speak and turn.play_on_pi and self.cfg.sounds.enabled and self.cfg.sounds.ack:
                 self.speaker.play_effect("ack")
 
             self._waiting_announced = False
@@ -465,16 +680,21 @@ class InteractionController:
             if set_emotion is not None:
                 set_emotion(result.emotion)     # the face keeps it while BMO talks
 
-            if speak and result.audio_wav:
-                reply = Path(self.cfg.runtime_path) / f"reply-{gen}.wav"
-                reply.write_bytes(result.audio_wav)
+            reply = None
+            if result.audio_wav:
+                reply = self.replies.save(turn.id, result.audio_wav)
+                self._emit({"type": "audio", "turn": turn.id, "url": f"/api/audio/{turn.id}.wav",
+                            "client_id": turn.client_id, "source": turn.source,
+                            "duration": self._wav_duration(result.audio_wav)})
+            if reply is not None and turn.play_on_pi:
                 prepare = getattr(self.ui, "prepare_speech", None)
                 if prepare is not None:
                     prepare(reply)          # lets the face follow the reply's loudness
                 if not self._set_state(BotState.SPEAKING, "", gen):
                     return
+                spoke = True
                 self.speaker.play(reply, block=True)
-            self._set_state(BotState.IDLE, "", gen)
+            ok = self._set_state(BotState.IDLE, "", gen)
         except RequestCancelled:
             log.info("Request cancelled")
             self.notify("cancelled", gen=gen)
@@ -498,9 +718,14 @@ class InteractionController:
         except ServerUnavailable as e:
             log.error("Server unavailable: %s", e)
             self.notify("server_unreachable", gen=gen)
+            self._start_health_retry()
         except Exception:
             log.exception("Interaction failed")
             self.notify("unknown", gen=gen)
+        finally:
+            self._finish_turn(turn, ok, spoke)
+            if own_audio and audio is not None:
+                self._delete(audio)
 
     # --------------------------------------------------------------- shutdown
     def shutdown(self) -> None:
@@ -508,6 +733,7 @@ class InteractionController:
             return
         self._closed = True
         self._cancel_listen_timer()
+        self._health_stop.set()
         if self._state is BotState.LISTENING:
             try:
                 self.mic.abort()

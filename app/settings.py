@@ -54,6 +54,18 @@ def _gain(value: Any) -> float:
     return n
 
 
+def _followup_seconds(value: Any) -> float:
+    if isinstance(value, bool):
+        raise SettingError("follow-up window must be 2-15 seconds")
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        raise SettingError("follow-up window must be a number of seconds") from None
+    if not 2 <= n <= 15:
+        raise SettingError("follow-up window must be 2-15 seconds")
+    return n
+
+
 # dotted config path -> validator returning the normalised value
 SETTINGS: dict[str, Callable[[Any], Any]] = {
     "speaker.volume": _volume,
@@ -62,6 +74,9 @@ SETTINGS: dict[str, Callable[[Any], Any]] = {
     "sounds.enabled": _bool,
     "microphone.gain_db": _gain,
     "memory.enabled": _bool,
+    "wake_word.enabled": _bool,
+    "listen.followup": _bool,
+    "listen.followup_seconds": _followup_seconds,
 }
 
 
