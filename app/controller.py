@@ -465,6 +465,9 @@ class InteractionController:
             if speak and result.audio_wav:
                 reply = Path(self.cfg.runtime_path) / f"reply-{gen}.wav"
                 reply.write_bytes(result.audio_wav)
+                prepare = getattr(self.ui, "prepare_speech", None)
+                if prepare is not None:
+                    prepare(reply)          # lets the face follow the reply's loudness
                 if not self._set_state(BotState.SPEAKING, "", gen):
                     return
                 self.speaker.play(reply, block=True)

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480">
+  <rect width="800" height="480" fill="#C2DEAC"/>
+  <circle id="eye-left" cx="280" cy="200" r="16" fill="#000000"/>
+  <circle id="eye-right" cx="520" cy="200" r="16" fill="#000000"/>
+  <path id="mouth-wide" d="M 340 250 Q 400 350 460 250 Z" fill="#000000"/>
+  <path id="tongue" d="M 375 295 Q 400 330 425 295 Z" fill="#F16972"/>
+  <path id="teeth" d="M 355 255 Q 400 270 445 255 Z" fill="#FFFFFF"/>
+</svg>

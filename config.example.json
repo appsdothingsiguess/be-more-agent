@@ -39,6 +39,7 @@
     "width": 800,
     "height": 480,
     "fullscreen": true,
+    "face_style": "svg",
     "text_only": false
   },
 

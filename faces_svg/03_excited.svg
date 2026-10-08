@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480">
+  <rect width="800" height="480" fill="#C2DEAC"/>
+  <path id="eye-left" d="M 250 200 Q 280 150 310 200" stroke="#000000" stroke-width="10" stroke-linecap="round" fill="none"/>
+  <path id="eye-right" d="M 490 200 Q 520 150 550 200" stroke="#000000" stroke-width="10" stroke-linecap="round" fill="none"/>
+  <ellipse id="blush-left" cx="220" cy="240" rx="35" ry="18" fill="#A6D29A"/>
+  <ellipse id="blush-right" cx="580" cy="240" rx="35" ry="18" fill="#A6D29A"/>
+  <path id="mouth" d="M 340 240 Q 400 360 460 240 Z" fill="#000000"/>
+  <path id="tongue" d="M 370 290 Q 400 330 430 290 Z" fill="#F16972"/>
+</svg>

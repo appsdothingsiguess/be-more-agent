@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import time
 from pathlib import Path
 
 from app.config import UIConfig
@@ -14,6 +15,7 @@ log = logging.getLogger(__name__)
 
 SPEAK_FRAME_MS = 50
 FRAME_MS = 500
+SVG_FRAME_MS = 33
 
 
 def load_face_frames(faces_dir: Path) -> dict[BotState, list[Path]]:
@@ -36,7 +38,8 @@ def gui_available() -> bool:
 
 
 class TkUI:
-    def __init__(self, cfg: UIConfig, faces_dir: Path, keymap: dict[str, str]):
+    def __init__(self, cfg: UIConfig, faces_dir: Path, keymap: dict[str, str],
+                 svg_dir: Path | None = None):
         import tkinter as tk
         from tkinter import ttk
 
@@ -65,9 +68,17 @@ class TkUI:
             self.w, self.h = cfg.width, cfg.height
             self.root.geometry(f"{self.w}x{self.h}")
 
-        self.background_label = tk.Label(self.root, bg="black")
-        self.background_label.place(x=0, y=0, relwidth=1, relheight=1)
-        self.background_label.bind("<Button-1>", self.toggle_hud_visibility)
+        self.animator = self._load_animator(svg_dir)
+        self._face_items: list = []
+        self.canvas = self.background_label = None
+        if self.animator is not None:
+            self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0, bd=0)
+            self.canvas.place(x=0, y=0, relwidth=1, relheight=1)
+            self.canvas.bind("<Button-1>", self.toggle_hud_visibility)
+        else:
+            self.background_label = tk.Label(self.root, bg="black")
+            self.background_label.place(x=0, y=0, relwidth=1, relheight=1)
+            self.background_label.bind("<Button-1>", self.toggle_hud_visibility)
 
         self.response_text = tk.Text(
             self.root, height=6, width=60, wrap=tk.WORD, state=tk.DISABLED,
@@ -79,8 +90,63 @@ class TkUI:
         self.root.bind("<Key>", self._on_key)
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
 
-        self.animations = self._load_animations(Path(faces_dir))
-        self._update_animation()
+        if self.animator is not None:
+            self.animations = {}
+            self._update_face()
+        else:
+            self.animations = self._load_animations(Path(faces_dir))
+            self._update_animation()
+
+    def _load_animator(self, svg_dir):
+        if not svg_dir:
+            return None
+        try:
+            from app.ui.face import FaceAnimator
+            from app.ui.face_svg import load_faces
+            return FaceAnimator(load_faces(Path(svg_dir)))
+        except Exception:
+            log.exception("SVG faces unavailable in %s, using PNG faces", svg_dir)
+            return None
+
+    def _update_face(self) -> None:
+        if self._closed:
+            return
+        try:
+            if self.animator.tick(time.monotonic()):
+                self._draw_face()
+        except Exception:
+            log.exception("Face animation failed")
+        self.root.after(SVG_FRAME_MS, self._update_face)
+
+    def _draw_face(self) -> None:
+        a, canvas = self.animator, self.canvas
+        ops = a.ops(self.w / 800, self.h / 480)
+        bg = "#%02x%02x%02x" % tuple(round(c) for c in a.current.bg)
+        if canvas.cget("bg") != bg:
+            canvas.configure(bg=bg)
+        items = self._face_items
+        for i, (kind, coords, color, width) in enumerate(ops):
+            if i < len(items) and items[i][0] == kind:
+                item = items[i][1]
+                canvas.coords(item, *coords)
+                if kind == "poly":
+                    canvas.itemconfigure(item, fill=color, state="normal")
+                else:
+                    canvas.itemconfigure(item, fill=color, width=width, state="normal")
+                continue
+            if i < len(items):
+                canvas.delete(items[i][1])
+            if kind == "poly":
+                item = canvas.create_polygon(*coords, fill=color, outline="")
+            else:
+                item = canvas.create_line(*coords, fill=color, width=width,
+                                          capstyle="round", joinstyle="round")
+            if i < len(items):
+                items[i] = (kind, item)
+            else:
+                items.append((kind, item))
+        for kind, item in items[len(ops):]:
+            canvas.itemconfigure(item, state="hidden")
 
     def _load_animations(self, faces_dir: Path) -> dict:
         anims = {}
@@ -148,9 +214,24 @@ class TkUI:
             if self.state != state:
                 self.state = state
                 self.frame_index = 0
+            if self.animator is not None:
+                self.animator.set_state(state, time.monotonic())
             if message:
                 self.status_var.set(message)
         self._post(_update)
+
+    def prepare_speech(self, wav_path) -> None:
+        """Called just before SPEAKING with the reply WAV, so the mouth can follow it."""
+        if self.animator is None:
+            return
+        from app.ui.face import envelope_from_wav
+        env, window = envelope_from_wav(wav_path)
+        self._post(lambda: self.animator.prepare_speech(env, window))
+
+    def set_emotion(self, name: str | None) -> None:
+        """Show an emotion ('happy', 'sad', ...) on the idle/speaking face for a few seconds."""
+        if self.animator is not None:
+            self._post(lambda: self.animator.set_emotion(name, time.monotonic()))
 
     def show_text(self, text: str, who: str = "bmo") -> None:
         def _update():

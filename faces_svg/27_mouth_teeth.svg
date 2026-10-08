@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480">
+  <rect width="800" height="480" fill="#C2DEAC"/>
+  <circle id="eye-left" cx="280" cy="200" r="16" fill="#000000"/>
+  <circle id="eye-right" cx="520" cy="200" r="16" fill="#000000"/>
+  <path id="mouth-teeth" d="M 358 255 Q 400 248 442 255 Q 400 292 358 255 Z" fill="#000000"/>
+  <path id="teeth" d="M 364 256 Q 400 250 436 256 Q 400 270 364 256 Z" fill="#FFFFFF"/>
+</svg>

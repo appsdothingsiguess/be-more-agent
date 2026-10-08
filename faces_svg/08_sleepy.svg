@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480">
+  <rect width="800" height="480" fill="#C2DEAC"/>
+  <path id="eye-left" d="M 250 205 Q 280 185 310 205 Z" fill="#000000"/>
+  <path id="eye-right" d="M 490 205 Q 520 185 550 205 Z" fill="#000000"/>
+  <path id="mouth" d="M 380 275 Q 400 285 420 275" stroke="#000000" stroke-width="6" stroke-linecap="round" fill="none"/>
+</svg>

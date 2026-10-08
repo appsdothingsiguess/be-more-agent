@@ -80,7 +80,8 @@ def run_interactive(cfg, use_gui: bool) -> int:
     client, reservation, mic, speaker, camera = build_components(cfg)
     if use_gui:
         from app.ui.gui import TkUI
-        ui = TkUI(cfg.ui, cfg.path(cfg.ui.faces_dir), cfg.input.keymap)
+        ui = TkUI(cfg.ui, cfg.path(cfg.ui.faces_dir), cfg.input.keymap,
+                  svg_dir=cfg.path(cfg.ui.faces_svg_dir) if cfg.ui.face_style == "svg" else None)
     else:
         from app.ui.headless import HeadlessUI
         ui = HeadlessUI()

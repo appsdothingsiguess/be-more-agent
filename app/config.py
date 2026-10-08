@@ -83,6 +83,9 @@ class UIConfig:
     height: int = 480
     fullscreen: bool = True
     faces_dir: str = "faces"
+    # "svg" = animated vector face drawn from faces_svg_dir; "png" = the older still frames.
+    face_style: str = "svg"
+    faces_svg_dir: str = "faces_svg"
     # Mute: replies and errors are text only (screen / web page); the speaker stays silent.
     text_only: bool = False
 

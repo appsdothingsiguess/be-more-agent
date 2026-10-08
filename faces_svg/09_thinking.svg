@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480">
+  <rect width="800" height="480" fill="#C2DEAC"/>
+  <circle id="eye-left" cx="310" cy="170" r="16" fill="#000000"/>
+  <circle id="eye-right" cx="550" cy="170" r="16" fill="#000000"/>
+  <circle id="mouth" cx="430" cy="260" r="10" fill="#000000"/>
+</svg>

@@ -76,6 +76,7 @@ Edit `config.json` (copied from `config.example.json`). Any subset of keys overr
 | `camera.vision_mode` | `manual` | `off`, `always` or `manual` |
 | `speaker.volume` | `50%` | Speaker volume set at startup |
 | `ui.enabled`, `.fullscreen` | `true`, `true` | Face GUI |
+| `ui.face_style`, `.faces_svg_dir` | `svg`, `faces_svg` | `svg` = animated vector face; `png` = the old still frames in `faces/` |
 | `ui.text_only` | `false` | Mute: replies and errors are text only, nothing is played |
 | `web.enabled`, `.port`, `.pin_file` | `true`, `8080`, `~/.config/bmo/web_pin` | Local web page |
 | `sounds.*` | all `true` | Greeting, ack and thinking sounds |
@@ -207,7 +208,7 @@ Unit tests use a fake server. `tools/bmo_test.py` is the reference acceptance te
 
 ## Customizing the character
 
-Faces are PNG sequences in `faces/<state>/` and sounds are `.wav` files in `sounds/<category>/`. Replace them to give the robot a new look; one sound is picked at random per category.
+The face is drawn live on the screen from the SVG expressions in `faces_svg/` (800x480 viewBox; circle, ellipse and path with M L H V Q T C S Z; solid colours; part ids `eye-left`, `eye-right`, `mouth`, `brow-*`, `blush-*`, `tongue`, `teeth`). Files are named `NN_name.svg`. BMO morphs between expressions, blinks, lets its eyes wander, and moves its mouth to the loudness of the reply (`mouth_closed/small/open/wide/o`). Each state has an expression (idle `neutral`, listening `listening`, looking `surprised`, thinking `thinking`, error `error`, start-up and long idle `sleepy`). `TkUI.set_emotion("happy")` shows any expression on the idle and speaking face for a few seconds; nothing sets it yet, because the server does not send an emotion. `venv/bin/python tools/face_preview.py out.png` renders every face to a PNG (`--morph a b` shows a transition). If the SVGs fail to load, BMO falls back to the PNG faces in `faces/<state>/`, which are still the older format. Sounds are `.wav` files in `sounds/<category>/`. Replace them to give the robot a new look; one sound is picked at random per category.
 
 ## License
 
