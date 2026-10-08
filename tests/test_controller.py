@@ -955,6 +955,7 @@ def test_memory_disabled_skips_but_resets(rig):
 
 def test_idle_trigger(rig):
     clock = [1000.0]
+    rig.cfg.memory.session_idle_minutes = 5
     rig.ctl.session._clock = lambda: clock[0]
     rig.ctl.session.last_activity = 1000.0
     rig.ctl.session.add_exchange("q", "a")

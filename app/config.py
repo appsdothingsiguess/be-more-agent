@@ -178,7 +178,7 @@ class MemoryConfig:
     max_messages: int = 10
     max_chars: int = 6000
     file: str = "memory.json"  # relative to runtime_dir
-    session_idle_minutes: float = 5.0  # idle time that ends a session and saves it to long-term memory; 0 = never
+    session_idle_minutes: float = 30.0  # idle time that ends a session and saves it to long-term memory; 0 = never
 
 
 @dataclass

@@ -96,6 +96,6 @@
     "enabled": true,
     "max_messages": 10,
     "max_chars": 6000,
-    "session_idle_minutes": 5
+    "session_idle_minutes": 30
   }
 }
