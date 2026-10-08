@@ -37,6 +37,7 @@ class AudioCapture:
         self._preroll: deque[np.ndarray] = deque(maxlen=n)
         self._sinks: list[Callable[[np.ndarray], None]] = []
         self._lock = threading.Lock()
+        self.skip_preroll = False       # set by the wake word for the next attach()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._proc = None
@@ -63,6 +64,9 @@ class AudioCapture:
         with self._lock:
             if fn not in self._sinks:
                 self._sinks.append(fn)
+            if self.skip_preroll:           # the preroll holds the wake phrase: leave it out
+                self.skip_preroll = False
+                return []
             return list(self._preroll)
 
     # -- lifecycle ---------------------------------------------------------

@@ -118,3 +118,11 @@ def test_stop_terminates_cleanly():
     cap.start()
     cap.stop()
     assert cap._thread is None
+
+
+def test_attach_skips_preroll_once_after_wake():
+    cap, _, _ = make(lambda c: setattr(c.listen, "preroll_seconds", 0.16))
+    cap._dispatch(np.full(FRAME_SAMPLES, 1, dtype="<i2"))
+    cap.skip_preroll = True
+    assert cap.attach(lambda f: None) == []      # wake phrase left out of the clip
+    assert len(cap.attach(lambda f: None)) == 1  # next attach gets the preroll again

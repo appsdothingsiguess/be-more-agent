@@ -182,7 +182,9 @@ class LiveListener:
         if now - self._last_wake < self.cfg.wake_word.cooldown_seconds:
             return
         self._last_wake = now
+        self.capture.skip_preroll = True
         if not self.controller.start_listening("wake"):
+            self.capture.skip_preroll = False
             return
         log.info("Wake word detected")
         if self.cfg.listen.prewarm_on_wake:

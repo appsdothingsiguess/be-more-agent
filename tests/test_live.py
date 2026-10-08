@@ -137,6 +137,7 @@ def test_wake_then_end_of_speech_finishes():
     r = Rig()
     r.step(score=0.9)
     assert r.calls() == [("start", "wake"), ("prewarm",)]
+    assert r.live.capture.skip_preroll  # the clip should not start with "hey jarvis"
     r.step(3, score=0.0, speech=True)
     r.step(2, speech=False)
     assert ("finish",) not in r.calls()
