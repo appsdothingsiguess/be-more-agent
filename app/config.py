@@ -20,6 +20,9 @@ APP_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = APP_ROOT / "config.json"
 
 VISION_MODES = ("off", "always", "manual")
+TLS_MODES = ("off", "self_signed", "files")
+MIC_BACKENDS = ("auto", "file", "stream")
+VAD_MODES = ("silero", "energy")
 
 # Physical BMO credential locations, in lookup order after BMO_TOKEN_FILE
 # and the configured token_file.
@@ -51,6 +54,9 @@ class MicrophoneConfig:
     auto_gain_control: bool = True
     max_seconds: float = 30.0
     min_seconds: float = 0.3
+    # "auto" = stream when the wake word is enabled, else record to a file.
+    backend: str = "auto"
+    stream_rate: int = 16000
 
 
 @dataclass
@@ -129,13 +135,40 @@ class WebConfig:
     host: str = "0.0.0.0"
     port: int = 8080
     pin_file: str = "~/.config/bmo/web_pin"
+    # HTTPS (needed for browser microphone access): off | self_signed | files.
+    tls: str = "off"
+    tls_port: int = 8443
+    http_redirect: bool = True
+    cert_file: str = "~/.config/bmo/tls/cert.pem"
+    key_file: str = "~/.config/bmo/tls/key.pem"
+    tls_hostnames: list[str] = field(default_factory=list)
+    trusted_proxies: list[str] = field(default_factory=list)
+    public_origins: list[str] = field(default_factory=list)
+    max_voice_bytes: int = 3_000_000
 
 
 @dataclass
 class WakeWordConfig:
     enabled: bool = False
-    model: str = "wakeword.onnx"
+    model: str = "hey_jarvis"
+    # Used automatically instead of `model` when the file exists (relative to the project root).
+    custom_model: str = "models/hey_bmo.onnx"
     threshold: float = 0.5
+    cooldown_seconds: float = 2.0
+
+
+@dataclass
+class ListenConfig:
+    # Hands-free listening: end-of-speech detection and follow-up window after a reply.
+    vad: str = "silero"  # falls back to energy when silero is unavailable
+    end_silence_seconds: float = 0.9
+    no_speech_timeout: float = 6.0
+    followup: bool = True
+    followup_seconds: float = 5.0
+    preroll_seconds: float = 0.4
+    auto_stop_button: bool = True
+    mute_tail_seconds: float = 0.6
+    prewarm_on_wake: bool = True
 
 
 @dataclass
@@ -168,6 +201,7 @@ class Config:
     input: InputConfig = field(default_factory=InputConfig)
     web: WebConfig = field(default_factory=WebConfig)
     wake_word: WakeWordConfig = field(default_factory=WakeWordConfig)
+    listen: ListenConfig = field(default_factory=ListenConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     def path(self, value: str) -> Path:
@@ -211,6 +245,34 @@ def validate(cfg: Config) -> Config:
     for name in ("capture_rate", "upload_rate", "channels"):
         if int(getattr(mic, name)) <= 0:
             raise ConfigError(f"microphone.{name} must be positive")
+    if mic.backend not in MIC_BACKENDS:
+        raise ConfigError(f"microphone.backend must be one of {MIC_BACKENDS}")
+    if int(mic.stream_rate) <= 0:
+        raise ConfigError("microphone.stream_rate must be positive")
+    web = cfg.web
+    if web.tls not in TLS_MODES:
+        raise ConfigError(f"web.tls must be one of {TLS_MODES}")
+    if not 1 <= int(web.tls_port) <= 65535:
+        raise ConfigError("web.tls_port must be 1-65535")
+    if int(web.max_voice_bytes) <= 0:
+        raise ConfigError("web.max_voice_bytes must be positive")
+    for name in ("tls_hostnames", "trusted_proxies", "public_origins"):
+        value = getattr(web, name)
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ConfigError(f"web.{name} must be a list of strings")
+    if not 0 <= float(cfg.wake_word.threshold) <= 1:
+        raise ConfigError("wake_word.threshold must be 0-1")
+    if float(cfg.wake_word.cooldown_seconds) < 0:
+        raise ConfigError("wake_word.cooldown_seconds must not be negative")
+    listen = cfg.listen
+    if listen.vad not in VAD_MODES:
+        raise ConfigError(f"listen.vad must be one of {VAD_MODES}")
+    for name in ("end_silence_seconds", "no_speech_timeout", "followup_seconds"):
+        if float(getattr(listen, name)) <= 0:
+            raise ConfigError(f"listen.{name} must be positive")
+    for name in ("preroll_seconds", "mute_tail_seconds"):
+        if float(getattr(listen, name)) < 0:
+            raise ConfigError(f"listen.{name} must not be negative")
     if not 2 <= int(cfg.memory.max_messages) <= 10:
         raise ConfigError("memory.max_messages must be 2-10")
     if int(cfg.memory.max_chars) <= 0:

@@ -13,7 +13,9 @@
     "channels": 1,
     "gain_db": 18,
     "set_capture_gain": true,
-    "auto_gain_control": true
+    "auto_gain_control": true,
+    "backend": "auto",
+    "stream_rate": 16000
   },
 
   "speaker": {
@@ -58,11 +60,36 @@
   "web": {
     "enabled": true,
     "port": 8080,
-    "pin_file": "~/.config/bmo/web_pin"
+    "pin_file": "~/.config/bmo/web_pin",
+    "tls": "off",
+    "tls_port": 8443,
+    "http_redirect": true,
+    "cert_file": "~/.config/bmo/tls/cert.pem",
+    "key_file": "~/.config/bmo/tls/key.pem",
+    "tls_hostnames": [],
+    "trusted_proxies": [],
+    "public_origins": [],
+    "max_voice_bytes": 3000000
   },
 
   "wake_word": {
-    "enabled": false
+    "enabled": false,
+    "model": "hey_jarvis",
+    "custom_model": "models/hey_bmo.onnx",
+    "threshold": 0.5,
+    "cooldown_seconds": 2.0
+  },
+
+  "listen": {
+    "vad": "silero",
+    "end_silence_seconds": 0.9,
+    "no_speech_timeout": 6.0,
+    "followup": true,
+    "followup_seconds": 5.0,
+    "preroll_seconds": 0.4,
+    "auto_stop_button": true,
+    "mute_tail_seconds": 0.6,
+    "prewarm_on_wake": true
   },
 
   "memory": {

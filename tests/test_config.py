@@ -110,3 +110,39 @@ def test_memory_defaults_and_validation(tmp_path):
         p.write_text(json.dumps({"memory": bad}))
         with pytest.raises(C.ConfigError):
             C.load_config(p)
+
+def test_web_mic_wake_listen_defaults():
+    cfg = C.load_config(C.APP_ROOT / "config.example.json")
+    w = cfg.web
+    assert (w.tls, w.tls_port, w.http_redirect, w.max_voice_bytes) == ("off", 8443, True, 3_000_000)
+    assert w.tls_hostnames == [] and w.trusted_proxies == [] and w.public_origins == []
+    assert w.cert_file.endswith("tls/cert.pem") and w.key_file.endswith("tls/key.pem")
+    assert (cfg.microphone.backend, cfg.microphone.stream_rate) == ("auto", 16000)
+    wk = cfg.wake_word
+    assert (wk.enabled, wk.model, wk.custom_model, wk.threshold, wk.cooldown_seconds) == (
+        False, "hey_jarvis", "models/hey_bmo.onnx", 0.5, 2.0)
+    ln = cfg.listen
+    assert (ln.vad, ln.end_silence_seconds, ln.no_speech_timeout) == ("silero", 0.9, 6.0)
+    assert (ln.followup, ln.followup_seconds, ln.preroll_seconds) == (True, 5.0, 0.4)
+    assert (ln.auto_stop_button, ln.mute_tail_seconds, ln.prewarm_on_wake) == (True, 0.6, True)
+
+
+def test_old_wake_word_keys_still_load(tmp_path):
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"wake_word": {"enabled": True, "model": "x.onnx", "threshold": 0.7}}))
+    cfg = C.load_config(p)
+    assert cfg.wake_word.enabled and cfg.wake_word.model == "x.onnx"
+    assert cfg.wake_word.threshold == 0.7 and cfg.wake_word.cooldown_seconds == 2.0
+
+
+def test_new_sections_validated(tmp_path):
+    bad = [{"web": {"tls": "maybe"}}, {"web": {"tls_port": 0}}, {"web": {"max_voice_bytes": 0}},
+           {"web": {"trusted_proxies": "10.0.0.1"}}, {"microphone": {"backend": "usb"}},
+           {"microphone": {"stream_rate": 0}}, {"wake_word": {"threshold": 2}},
+           {"listen": {"vad": "magic"}}, {"listen": {"end_silence_seconds": 0}},
+           {"listen": {"preroll_seconds": -1}}]
+    for section in bad:
+        p = tmp_path / "c.json"
+        p.write_text(json.dumps(section))
+        with pytest.raises(C.ConfigError):
+            C.load_config(p)
