@@ -35,7 +35,7 @@ def test_requirements_thin():
 
 def test_service_template():
     t = _text("tools/bmo-agent.service")
-    assert "User=" in t and "network-online.target" in t and "Restart=on-failure" in t
+    assert "User=" in t and "network-online.target" in t and "Restart=always" in t
     code = "\n".join(l for l in t.splitlines() if not l.lstrip().startswith("#"))
     assert "token" not in code.lower()
     assert "Bearer" not in t

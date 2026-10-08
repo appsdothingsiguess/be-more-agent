@@ -1,5 +1,5 @@
 # Template rendered by setup.sh --install-service (@USER@, @REPO@, @PYTHON@).
-# Do NOT enable this until the acceptance tests pass.
+# Restart=always: BMO comes back even after a clean exit (QUIT), so it is always live.
 [Unit]
 Description=BMO thin client
 After=network-online.target sound.target
@@ -13,7 +13,7 @@ User=@USER@
 WorkingDirectory=@REPO@
 ExecStart=@PYTHON@ -m app --headless
 Environment=PYTHONUNBUFFERED=1
-Restart=on-failure
+Restart=always
 RestartSec=5
 KillSignal=SIGTERM
 TimeoutStopSec=15
