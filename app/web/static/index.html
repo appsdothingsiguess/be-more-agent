@@ -4,46 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BMO</title>
-<style>
-:root{--bg:#e6faf3;--fg:#0b3b36;--card:#fff;--accent:#2bb59b;--accent-fg:#fff;--muted:#4c7a73;--line:#b5e3d6;--me:#cdeee4;--bmo:#fff;--err:#c0392b;--errbg:#fde8e5}
-@media (prefers-color-scheme:dark){:root{--bg:#0d1f1d;--fg:#d9f5ee;--card:#152e2b;--accent:#2bb59b;--accent-fg:#06201c;--muted:#8fbdb3;--line:#25504a;--me:#1d4a43;--bmo:#183532;--err:#ff8a7a;--errbg:#3b1d1a}}
-*{box-sizing:border-box}
-html,body{margin:0;height:100%}
-body{background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,sans-serif;overflow-x:hidden}
-.hidden{display:none!important}
-#app{display:flex;flex-direction:column;height:100%;max-width:720px;margin:0 auto}
-header{display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--accent);color:var(--accent-fg)}
-header h1{margin:0;font-size:1.2rem;flex:1}
-.badge{padding:2px 10px;border-radius:12px;background:rgba(255,255,255,.3);font-size:.85rem}
-#recon{font-size:.8rem}
-button,select,textarea,input{font:inherit;color:inherit}
-button{background:var(--accent);color:var(--accent-fg);border:0;border-radius:8px;padding:8px 14px;cursor:pointer}
-button.ghost{background:transparent;color:inherit;border:1px solid currentColor}
-#banner{background:var(--errbg);color:var(--err);padding:8px 12px;display:flex;gap:8px;align-items:flex-start}
-#banner div{flex:1;word-break:break-word}
-#chat{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
-.msg{max-width:85%;padding:8px 12px;border-radius:14px;white-space:pre-wrap;word-break:break-word;border:1px solid var(--line)}
-.msg small{display:block;color:var(--muted);font-size:.75rem}
-.msg.user{align-self:flex-end;background:var(--me)}
-.msg.bmo{align-self:flex-start;background:var(--bmo)}
-details{background:var(--card);border-top:1px solid var(--line);padding:6px 12px}
-summary{cursor:pointer;font-weight:600}
-.row{display:flex;align-items:center;gap:8px;margin:8px 0;flex-wrap:wrap}
-.row label{flex:1;min-width:120px}
-.row input[type=range]{flex:2;min-width:100px}
-.err{color:var(--err);font-size:.9rem}
-#composer{padding:8px 12px;background:var(--card);border-top:1px solid var(--line)}
-#composer textarea{width:100%;resize:none;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--bg)}
-#login{max-width:320px;margin:20vh auto;padding:16px;text-align:center}
-#login input{width:100%;font-size:1.5rem;text-align:center;letter-spacing:.3em;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--card);margin:12px 0}
-.memlist{list-style:none;margin:8px 0;padding:0}
-.memlist li{display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--line)}
-.memlist li span{flex:1;word-break:break-word}
-.memlist button{padding:2px 10px;font-size:.85rem}
-.muted{color:var(--muted);font-size:.9rem}
-dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:8px 0}
-dd{margin:0;word-break:break-word}
-</style>
+<link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
 <div id="login" class="hidden">
@@ -56,232 +17,88 @@ dd{margin:0;word-break:break-word}
 </div>
 
 <div id="app" class="hidden">
-  <header>
-    <h1>BMO</h1>
-    <span id="recon" class="hidden">reconnecting...</span>
-    <span id="badge" class="badge">...</span>
-    <button class="ghost" id="logout" type="button">Log out</button>
-  </header>
-  <div id="banner" class="hidden" role="alert"><div id="bannerText"></div><button class="ghost" id="bannerX" type="button" aria-label="Dismiss">x</button></div>
-  <div id="chat" aria-live="polite"></div>
-
-  <details id="settingsPanel">
-    <summary>Settings</summary>
-    <div class="row"><label for="s-vol">Volume <span id="s-vol-v"></span></label><input id="s-vol" type="range" min="0" max="100" step="10"></div>
-    <div class="row"><label for="s-mute">Mute BMO (text only)</label><input id="s-mute" type="checkbox"></div>
-    <div class="row"><label for="s-cam">Camera mode</label>
-      <select id="s-cam"><option value="always">always</option><option value="manual">manual</option><option value="off">off</option></select></div>
-    <div class="row"><label for="s-snd">Sound effects</label><input id="s-snd" type="checkbox"></div>
-    <div class="row"><label for="s-gain">Mic boost <span id="s-gain-v"></span> dB</label><input id="s-gain" type="range" min="0" max="30" step="3"></div>
-    <div id="setErr" class="err"></div>
-  </details>
-
-  <details id="memoryPanel">
-    <summary>Memory</summary>
-    <div class="row hidden" id="memToggleRow"><label for="s-mem">BMO remembers things</label><input id="s-mem" type="checkbox"></div>
-    <p id="convCount" class="muted"></p>
-    <ul id="memList" class="memlist"></ul>
-    <p id="memEmpty" class="muted"></p>
-    <div class="row"><button id="forget" class="ghost" type="button">Forget everything</button></div>
-    <div id="memMsg" class="muted" role="status"></div>
-    <div id="memErr" class="err"></div>
-  </details>
-
-  <details id="serverPanel">
-    <summary>Server</summary>
-    <dl id="serverInfo"></dl>
-  </details>
-
-  <div id="composer">
-    <textarea id="text" rows="2" maxlength="2000" placeholder="Say something to BMO" aria-label="Message"></textarea>
-    <div class="row">
-      <label><input id="speak" type="checkbox"> Speak reply</label>
-      <button id="stop" class="ghost hidden" type="button">Interrupt</button>
-      <button id="send" type="button">Send</button>
+  <div id="main">
+    <header>
+      <h1>BMO</h1>
+      <span id="liveChip" class="chip">...</span>
+      <span id="recon" class="hidden">reconnecting...</span>
+      <button class="ghost icon" id="gear" type="button" aria-label="Settings" aria-controls="sheet" aria-expanded="false">&#9881;</button>
+    </header>
+    <div id="banner" class="hidden" role="alert"><div id="bannerText"></div><button class="ghost" id="bannerX" type="button" aria-label="Dismiss">x</button></div>
+    <div id="chat" role="log" aria-live="polite"></div>
+    <div id="composer">
+      <div id="micHint" class="muted hidden"></div>
+      <div class="compose-row">
+        <button id="mic" class="mic" type="button" aria-label="Start recording">
+          <span id="micIcon">&#127908;</span>
+          <span id="levelBars" class="bars hidden" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        </button>
+        <textarea id="text" rows="1" maxlength="2000" placeholder="Say something to BMO" aria-label="Message"></textarea>
+        <button id="send" type="button">Send</button>
+        <button id="stop" class="stop hidden" type="button">Stop</button>
+      </div>
+      <div id="sendErr" class="err"></div>
     </div>
-    <div id="sendErr" class="err"></div>
   </div>
+
+  <aside id="sheet" class="hidden" role="dialog" aria-label="Settings" tabindex="-1">
+    <div class="sheet-head"><h2>Settings</h2><button class="ghost" id="sheetX" type="button" aria-label="Close settings">Close</button></div>
+
+    <section>
+      <h3>Reply audio on this device</h3>
+      <div id="outSeg" class="seg" role="radiogroup" aria-label="Reply audio on this device">
+        <button type="button" role="radio" data-out="device">This device</button>
+        <button type="button" role="radio" data-out="bmo">BMO</button>
+        <button type="button" role="radio" data-out="both">Both</button>
+        <button type="button" role="radio" data-out="text">Text only</button>
+      </div>
+      <p class="muted">Where spoken replies to your messages are played.</p>
+    </section>
+
+    <section>
+      <h3>BMO's speaker</h3>
+      <div class="row" id="row-vol"><label for="s-vol">Volume <span id="s-vol-v"></span></label><input id="s-vol" type="range" min="0" max="100" step="10"></div>
+      <div class="row" id="row-snd"><label for="s-snd">Sound effects</label><input id="s-snd" type="checkbox"></div>
+      <div class="row" id="row-mute"><label for="s-mute">Mute BMO (text only)</label><input id="s-mute" type="checkbox"></div>
+    </section>
+
+    <section id="sec-listen">
+      <h3>Listening</h3>
+      <div class="row" id="row-wake"><label for="s-wake">Wake word <span id="wakeModel" class="muted"></span></label><input id="s-wake" type="checkbox"></div>
+      <div class="row" id="row-follow"><label for="s-follow">Listen for a follow-up</label><input id="s-follow" type="checkbox"></div>
+      <div class="row" id="row-followsec"><label for="s-followsec">Follow-up wait <span id="s-followsec-v"></span> s</label><input id="s-followsec" type="range" min="2" max="15" step="1"></div>
+      <div class="row" id="row-gain"><label for="s-gain">Mic boost <span id="s-gain-v"></span> dB</label><input id="s-gain" type="range" min="0" max="30" step="3"></div>
+    </section>
+
+    <section id="sec-cam">
+      <h3>Camera</h3>
+      <div class="row" id="row-cam"><label for="s-cam">Camera mode</label>
+        <select id="s-cam"><option value="always">always</option><option value="manual">manual</option><option value="off">off</option></select></div>
+    </section>
+    <div id="setErr" class="err"></div>
+
+    <section id="memoryPanel">
+      <h3>Memory</h3>
+      <div class="row hidden" id="memToggleRow"><label for="s-mem">BMO remembers things</label><input id="s-mem" type="checkbox"></div>
+      <p id="convCount" class="muted"></p>
+      <ul id="memList" class="memlist"></ul>
+      <p id="memEmpty" class="muted"></p>
+      <div class="row"><button id="forget" class="ghost" type="button">Forget everything</button></div>
+      <div id="memMsg" class="muted" role="status"></div>
+      <div id="memErr" class="err"></div>
+    </section>
+
+    <section id="serverPanel">
+      <h3>Status</h3>
+      <dl id="serverInfo"></dl>
+    </section>
+
+    <section>
+      <div class="row"><button class="ghost" id="logout" type="button">Log out</button></div>
+    </section>
+  </aside>
 </div>
 
-<script>
-(function(){
-"use strict";
-var $=function(id){return document.getElementById(id)};
-var es=null, backoff=1000, speakTouched=false, settings={}, state="";
-
-function api(method,path,body){
-  var o={method:method,credentials:"same-origin",headers:{}};
-  if(body!==undefined){o.headers["Content-Type"]="application/json";o.body=JSON.stringify(body)}
-  return fetch(path,o).then(function(r){
-    return r.json().catch(function(){return {}}).then(function(j){
-      if(r.status===401&&path!=="/api/login"){showLogin()}
-      return {ok:r.ok,status:r.status,data:j};
-    });
-  });
-}
-function showLogin(){
-  if(es){es.close();es=null}
-  $("app").classList.add("hidden");$("login").classList.remove("hidden");$("pin").focus();
-}
-function showApp(){
-  $("login").classList.add("hidden");$("app").classList.remove("hidden");
-}
-function volNum(v){var n=parseInt(String(v),10);return isNaN(n)?0:n}
-function applySettings(s){
-  settings=s;
-  $("s-vol").value=volNum(s["speaker.volume"]);$("s-vol-v").textContent=volNum(s["speaker.volume"])+"%";
-  $("s-mute").checked=!!s["ui.text_only"];
-  $("s-cam").value=s["camera.vision_mode"];
-  $("s-snd").checked=!!s["sounds.enabled"];
-  $("s-gain").value=s["microphone.gain_db"];$("s-gain-v").textContent=s["microphone.gain_db"];
-  var hasMem=Object.prototype.hasOwnProperty.call(s,"memory.enabled");
-  $("memToggleRow").classList.toggle("hidden",!hasMem);
-  if(hasMem)$("s-mem").checked=!!s["memory.enabled"];
-  if(!speakTouched)$("speak").checked=!s["ui.text_only"];
-}
-function init(){
-  return api("GET","/api/state").then(function(r){
-    if(!r.ok)return;
-    showApp();applySettings(r.data.settings);setState(r.data.state);connect();
-  });
-}
-function setState(s){
-  state=s;$("badge").textContent=s;
-  $("stop").classList.toggle("hidden",!(s==="thinking"||s==="speaking"));
-}
-function addMsg(who,text){
-  var d=document.createElement("div");d.className="msg "+(who==="user"?"user":"bmo");
-  var l=document.createElement("small");l.textContent=who==="user"?"You":"BMO";
-  var t=document.createElement("span");t.textContent=text;
-  d.appendChild(l);d.appendChild(t);
-  var c=$("chat");var near=c.scrollHeight-c.scrollTop-c.clientHeight<80;
-  c.appendChild(d);
-  if(near||who==="user")c.scrollTop=c.scrollHeight;
-}
-function onEvent(ev){
-  if(ev.type==="state")setState(ev.state);
-  else if(ev.type==="text")addMsg(ev.who,ev.text);
-  else if(ev.type==="error"){
-    $("bannerText").textContent=(ev.message||"Error")+(ev.hint?" - "+ev.hint:"");
-    $("banner").classList.remove("hidden");
-  }
-  else if(ev.type==="notice")addMsg("bmo",(ev.message||"")+(ev.hint?" "+ev.hint:""));
-}
-function connect(){
-  if(es)es.close();
-  $("chat").textContent="";
-  es=new EventSource("/api/events");
-  es.onopen=function(){backoff=1000;$("recon").classList.add("hidden")};
-  es.onmessage=function(m){try{onEvent(JSON.parse(m.data))}catch(e){}};
-  es.onerror=function(){
-    $("recon").classList.remove("hidden");
-    es.close();es=null;
-    setTimeout(function(){
-      api("GET","/api/state").then(function(r){if(r.ok)connect()});
-    },backoff);
-    backoff=Math.min(backoff*2,15000);
-  };
-}
-$("loginForm").addEventListener("submit",function(e){
-  e.preventDefault();
-  api("POST","/api/login",{pin:$("pin").value}).then(function(r){
-    if(r.ok){$("pin").value="";$("loginErr").textContent="";init()}
-    else $("loginErr").textContent=r.data.error||"Login failed";
-  });
-});
-$("logout").addEventListener("click",function(){api("POST","/api/logout",{}).then(showLogin)});
-$("bannerX").addEventListener("click",function(){$("banner").classList.add("hidden")});
-function send(){
-  var t=$("text").value.trim();if(!t)return;
-  api("POST","/api/message",{text:t,speak:$("speak").checked}).then(function(r){
-    if(r.ok){$("text").value="";$("sendErr").textContent=""}
-    else $("sendErr").textContent=r.data.error||"Could not send";
-  });
-}
-$("send").addEventListener("click",send);
-$("text").addEventListener("keydown",function(e){
-  if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send()}
-});
-$("speak").addEventListener("change",function(){speakTouched=true});
-$("stop").addEventListener("click",function(){api("POST","/api/interrupt",{})});
-
-function post(key,val){
-  var b={};b[key]=val;
-  api("POST","/api/settings",b).then(function(r){
-    if(r.ok){$("setErr").textContent="";applySettings(r.data)}
-    else{$("setErr").textContent=(r.data.key?r.data.key+": ":"")+(r.data.error||"Rejected");applySettings(settings)}
-  });
-}
-$("s-vol").addEventListener("input",function(){$("s-vol-v").textContent=this.value+"%"});
-$("s-vol").addEventListener("change",function(){post("speaker.volume",parseInt(this.value,10))});
-$("s-mute").addEventListener("change",function(){post("ui.text_only",this.checked)});
-$("s-cam").addEventListener("change",function(){post("camera.vision_mode",this.value)});
-$("s-snd").addEventListener("change",function(){post("sounds.enabled",this.checked)});
-$("s-gain").addEventListener("input",function(){$("s-gain-v").textContent=this.value});
-$("s-gain").addEventListener("change",function(){post("microphone.gain_db",parseFloat(this.value))});
-
-$("s-mem").addEventListener("change",function(){post("memory.enabled",this.checked)});
-
-function loadMemories(){
-  return api("GET","/api/memories").then(function(r){
-    if(!r.ok){$("memErr").textContent=r.data.error||"Could not load memory";return}
-    $("memErr").textContent="";
-    var conv=r.data.conversation||[], lt=r.data.long_term||{}, list=$("memList");
-    var n=conv.length;
-    $("convCount").textContent="This conversation: "+n+" message"+(n===1?"":"s");
-    list.textContent="";
-    var mems=lt.available?(lt.memories||[]):[];
-    mems.forEach(function(m){
-      var li=document.createElement("li");
-      var sp=document.createElement("span");sp.textContent=m.content;
-      var b=document.createElement("button");b.type="button";b.className="ghost";
-      b.textContent="Delete";b.setAttribute("aria-label","Delete memory");
-      b.addEventListener("click",function(){
-        api("POST","/api/memories/delete",{id:m.id}).then(function(d){
-          $("memErr").textContent=d.ok?"":(d.data.error||"Could not delete");
-          loadMemories();
-        });
-      });
-      li.appendChild(sp);li.appendChild(b);list.appendChild(li);
-    });
-    $("memEmpty").textContent=!lt.available?"Long-term memory isn't set up on the server yet.":
-      (mems.length?"":"BMO doesn't remember anything yet.");
-  });
-}
-$("forget").addEventListener("click",function(){
-  if(!confirm("Forget everything? BMO will lose this conversation and its long-term memories."))return;
-  api("POST","/api/memories/forget",{}).then(function(r){
-    var d=r.data||{};
-    if(!r.ok||d.server==="error"){
-      $("memMsg").textContent="";
-      $("memErr").textContent=r.ok?"Forgot this conversation, but the server could not clear long-term memory.":(d.error||"Could not forget");
-    }else{
-      $("memErr").textContent="";
-      $("memMsg").textContent=d.server==="ok"?"Forgot everything.":"Forgot this conversation; long-term memory isn't available yet.";
-    }
-    loadMemories();
-  });
-});
-$("memoryPanel").addEventListener("toggle",function(){if(this.open)loadMemories()});
-
-function refreshServer(){
-  api("GET","/api/status").then(function(r){
-    if(!r.ok)return;
-    var dl=$("serverInfo");dl.textContent="";
-    Object.keys(r.data).forEach(function(k){
-      var v=r.data[k];if(v===null||v===undefined)v="-";
-      if(typeof v==="object")v=JSON.stringify(v);
-      var dt=document.createElement("dt");dt.textContent=k;
-      var dd=document.createElement("dd");dd.textContent=String(v);
-      dl.appendChild(dt);dl.appendChild(dd);
-    });
-  });
-}
-setInterval(function(){if($("serverPanel").open&&!$("app").classList.contains("hidden"))refreshServer()},10000);
-$("serverPanel").addEventListener("toggle",function(){if(this.open)refreshServer()});
-
-init().then(function(){if($("app").classList.contains("hidden"))showLogin();else loadMemories()});
-})();
-</script>
+<script src="/static/app.js"></script>
 </body>
 </html>
