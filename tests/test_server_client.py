@@ -212,3 +212,26 @@ def test_all_server_emotions_exist_as_faces():
     from app.ui.face_svg import load_faces
     faces = load_faces("faces_svg")
     assert EMOTIONS - {"neutral"} <= set(faces) and set(emotion_names(faces)) <= EMOTIONS
+
+
+def test_consolidate_memories(client, server):
+    msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+    out = client.consolidate_memories("abc", msgs, "idle", "2026-01-01T00:00:00+00:00",
+                                      "2026-01-01T00:05:00+00:00")
+    assert out == {"accepted": True, "stored": 2}
+    rec = server.requests[-1]
+    assert rec["method"] == "POST" and rec["path"] == "/v1/bmo/memories/consolidate"
+    assert rec["json"] == {"session_id": "abc", "reason": "idle", "messages": msgs,
+                           "started_at": "2026-01-01T00:00:00+00:00",
+                           "ended_at": "2026-01-01T00:05:00+00:00"}
+    server.consolidate_status = 202
+    assert client.consolidate_memories("abc", msgs, "idle", "a", "b")["accepted"] is True
+
+
+def test_consolidate_memories_404_and_errors(client, server):
+    server.memory_routes = False
+    assert client.consolidate_memories("abc", [], "idle", "a", "b") is None
+    server.memory_routes = True
+    server.auth_mode_401 = True
+    with pytest.raises(AuthError):
+        client.consolidate_memories("abc", [], "idle", "a", "b")

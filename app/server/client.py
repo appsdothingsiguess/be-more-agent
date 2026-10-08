@@ -270,6 +270,17 @@ class BMOClient:
         r = self._short("DELETE", f"/v1/bmo/memories/{int(memory_id)}", ok=(404,))
         return None if r.status_code == 404 else True
 
+    def consolidate_memories(self, session_id: str, messages: list[dict], reason: str,
+                             started_at: str, ended_at: str) -> dict | None:
+        """Hand a finished session to the server for long-term memory. None = no such route."""
+        r = self._short("POST", "/v1/bmo/memories/consolidate", ok=(404,), json={
+            "session_id": session_id, "reason": reason, "messages": messages,
+            "started_at": started_at, "ended_at": ended_at})
+        if r.status_code == 404:
+            return None
+        body = self._json(r)
+        return body if isinstance(body, dict) else {}
+
     def transcribe(self, audio_path: str, request_id: str | None = None) -> str:
         rid = request_id or self.new_request_id()
         with open(audio_path, "rb") as f:

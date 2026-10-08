@@ -413,9 +413,13 @@ class _Handler(BaseHTTPRequestHandler):
             return
         c = self.web.controller
         if path == "/api/state":
-            return self._json(200, {"state": c.state.value,
-                                    "settings": settings_mod.current(self.web.cfg),
-                                    "text_only": self.web.cfg.ui.text_only})
+            state = {"state": c.state.value,
+                     "settings": settings_mod.current(self.web.cfg),
+                     "text_only": self.web.cfg.ui.text_only}
+            info = getattr(c, "session_info", None)
+            if callable(info):
+                state["session"] = info()
+            return self._json(200, state)
         if path == "/api/events":
             return self._events()
         if path.startswith("/api/audio/"):
@@ -461,6 +465,11 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True})
         if path == "/api/settings":
             return self._settings(data)
+        if path == "/api/session/new":
+            fn = getattr(self.web.controller, "new_session", None)
+            if not callable(fn):
+                return self._json(501, {"error": "sessions not supported"})
+            return self._json(200, fn())
         if path == "/api/memories/forget":
             return self._memory_call("forget_memory")
         if path == "/api/memories/delete":
@@ -601,7 +610,11 @@ class _Handler(BaseHTTPRequestHandler):
         c = self.web.controller
         if not all(callable(getattr(c, n, None)) for n in ("list_memories", "conversation")):
             return self._json(501, {"error": "memory not supported"})
-        self._json(200, {"long_term": c.list_memories(), "conversation": c.conversation()})
+        body = {"long_term": c.list_memories(), "conversation": c.conversation()}
+        info = getattr(c, "session_info", None)
+        if callable(info):
+            body["session"] = info()
+        self._json(200, body)
 
     def _memory_call(self, name: str, *args) -> None:
         fn = getattr(self.web.controller, name, None)

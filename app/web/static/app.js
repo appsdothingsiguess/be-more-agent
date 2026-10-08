@@ -3,6 +3,7 @@
 var $=function(id){return document.getElementById(id)};
 var es=null, backoff=1000, settings={}, live=null, offline=false;
 var srvPhase=null, srvMsg="", sending=false, recState=null, playingHere=false;
+var sessionMsgs=null;
 var indKey="", indSince=0, pending=null, sheetTimer=null;
 
 // ---- helpers ----
@@ -75,7 +76,7 @@ function init(){
 // ---- settings ----
 function num(v){var n=parseFloat(String(v));return isNaN(n)?0:n}
 var ROWS={"speaker.volume":"row-vol","sounds.enabled":"row-snd","ui.text_only":"row-mute","wake_word.enabled":"row-wake",
-  "listen.followup":"row-follow","listen.followup_seconds":"row-followsec","microphone.gain_db":"row-gain","camera.vision_mode":"row-cam"};
+  "listen.followup":"row-follow","listen.followup_seconds":"row-followsec","microphone.gain_db":"row-gain","camera.vision_mode":"row-cam","memory.session_idle_minutes":"row-idle"};
 function applySettings(s){
   settings=s||{};
   Object.keys(ROWS).forEach(function(k){$(ROWS[k]).classList.toggle("hidden",!has(k))});
@@ -91,6 +92,8 @@ function applySettings(s){
   if(has("listen.followup_seconds")){$("s-followsec").value=num(settings["listen.followup_seconds"]);$("s-followsec-v").textContent=num(settings["listen.followup_seconds"])}
   $("memToggleRow").classList.toggle("hidden",!has("memory.enabled"));
   if(has("memory.enabled"))$("s-mem").checked=!!settings["memory.enabled"];
+  if(has("memory.session_idle_minutes")){$("s-idle").value=num(settings["memory.session_idle_minutes"]);$("s-idle-v").textContent=num(settings["memory.session_idle_minutes"])}
+  renderSessInfo();
 }
 function post(key,val){
   var b={};b[key]=val;
@@ -109,6 +112,7 @@ bindRange("s-followsec","s-followsec-v","listen.followup_seconds",parseFloat);
 function bindCheck(id,key){$(id).addEventListener("change",function(){post(key,this.checked)})}
 bindCheck("s-mute","ui.text_only");bindCheck("s-snd","sounds.enabled");bindCheck("s-wake","wake_word.enabled");
 bindCheck("s-follow","listen.followup");bindCheck("s-mem","memory.enabled");
+$("s-idle").addEventListener("change",function(){post("memory.session_idle_minutes",num(this.value))});
 $("s-cam").addEventListener("change",function(){post("camera.vision_mode",this.value)});
 $("outSeg").addEventListener("click",function(e){
   var b=e.target.closest?e.target.closest("button"):null;
@@ -152,6 +156,19 @@ function indicatorEl(){
 }
 function resetChat(){
   var c=$("chat");c.textContent="";pending=null;c.appendChild(indicatorEl());
+}
+function sysLine(text){
+  var d=document.createElement("div");d.className="sysline";d.textContent=text;
+  $("chat").insertBefore(d,indicatorEl());
+}
+function onSession(ev){
+  resetChat();
+  sessionMsgs=0;
+  var t="New session started";
+  if(ev.consolidated==="ok")t+=" - Saved to long-term memory";
+  else if(ev.consolidated==="pending")t+=" - Will save when the server is back";
+  sysLine(t);
+  renderSessInfo();
 }
 function onText(ev){
   if(ev.who==="user"&&pending&&(pending.turn==null||pending.turn===ev.turn)){
@@ -219,6 +236,7 @@ function setLevel(rms){
 function onEvent(ev){
   switch(ev.type){
   case "text":onText(ev);break;
+  case "session":onSession(ev);break;
   case "error":
     showBanner((ev.message||"Error")+(ev.hint?" - "+ev.hint:""));
     srvPhase=null;sending=false;renderIndicator();break;
@@ -493,6 +511,8 @@ function loadMemories(){
     var conv=r.data.conversation||[], lt=r.data.long_term||{}, list=$("memList");
     var n=conv.length;
     $("convCount").textContent="This conversation: "+n+" message"+(n===1?"":"s");
+    if(r.data.session&&typeof r.data.session.messages==="number")sessionMsgs=r.data.session.messages;
+    renderSessInfo();
     list.textContent="";
     var mems=lt.available?(lt.memories||[]):[];
     mems.forEach(function(m){
@@ -512,6 +532,19 @@ function loadMemories(){
       (mems.length?"":"BMO doesn't remember anything yet.");
   });
 }
+function renderSessInfo(){
+  var m=has("memory.session_idle_minutes")?num(settings["memory.session_idle_minutes"]):null;
+  var t="";
+  if(sessionMsgs!==null)t="Session: "+sessionMsgs+" message"+(sessionMsgs===1?"":"s");
+  if(m!==null)t+=(t?" \u00b7 ":"")+(m>0?"saves to long-term memory after "+m+" min idle":"idle saving is off");
+  $("sessInfo").textContent=t;
+}
+$("newSession").addEventListener("click",function(){
+  var b=this;b.disabled=true;
+  api("POST","/api/session/new",{}).then(function(r){
+    if(!r.ok)showBanner((r.data&&r.data.error)||"Could not start a new session");
+  }).catch(function(){showBanner("Could not start a new session")}).then(function(){b.disabled=false});
+});
 $("forget").addEventListener("click",function(){
   if(!confirm("Forget everything? BMO will lose this conversation and its long-term memories."))return;
   api("POST","/api/memories/forget",{}).then(function(r){

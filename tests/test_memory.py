@@ -3,7 +3,8 @@ import os
 
 import pytest
 
-from app.memory import ConversationMemory, is_forget_command
+from app.memory import (ConversationMemory, ConversationSession, is_forget_command,
+                        is_new_session_command)
 
 
 def test_missing_file_is_empty(tmp_path):
@@ -116,3 +117,59 @@ def test_forget_commands(text):
 ])
 def test_not_forget_commands(text):
     assert not is_forget_command(text)
+
+
+# -- sessions ---------------------------------------------------------------
+def test_session_persists_and_reloads(tmp_path):
+    p = tmp_path / "s.json"
+    s = ConversationSession(p)
+    assert s.is_empty and len(s.id) == 32
+    s.add_exchange(" hi ", "hello")
+    data = json.loads(p.read_text())
+    assert data["id"] == s.id and data["messages"][0] == {"role": "user", "content": "hi"}
+    again = ConversationSession(p)
+    assert again.id == s.id and again.messages() == s.messages() and not again.is_empty
+    assert again.started_at == s.started_at
+
+
+def test_session_caps_drop_oldest_pairs(tmp_path):
+    s = ConversationSession(tmp_path / "s.json")
+    for i in range(50):
+        s.add_exchange(f"q{i}", f"a{i}")
+    msgs = s.messages()
+    assert len(msgs) == 80 and msgs[0] == {"role": "user", "content": "q10"}
+    big = ConversationSession(tmp_path / "b.json")
+    for i in range(10):
+        big.add_exchange("q" * 5000, "a" * 5000)
+    assert sum(len(m["content"]) for m in big.messages()) <= 40000 and len(big) == 8
+
+
+def test_session_idle_and_reset(tmp_path):
+    t = [100.0]
+    s = ConversationSession(tmp_path / "s.json", clock=lambda: t[0])
+    s.add_exchange("q", "a")
+    t[0] = 160.0
+    assert s.idle_seconds() == 60 and s.idle_seconds(now=400.0) == 300
+    old = s.id
+    assert s.reset() != old and s.is_empty
+    assert ConversationSession(tmp_path / "s.json").is_empty
+
+
+def test_session_bad_file_ignored(tmp_path):
+    p = tmp_path / "s.json"
+    p.write_text("[1,2")
+    assert ConversationSession(p).is_empty
+    p.write_text('{"id": 5}')
+    assert ConversationSession(p).is_empty
+
+
+@pytest.mark.parametrize("text", ["new session", "New conversation!", "start over", "bmo, new chat",
+                                  "Hey BMO, start a new conversation please", "new session please"])
+def test_new_session_command_matches(text):
+    assert is_new_session_command(text)
+
+
+@pytest.mark.parametrize("text", ["", "what is a new session", "tell me about a new chat",
+                                  "forget everything", "start overnight"])
+def test_new_session_command_rejects(text):
+    assert not is_new_session_command(text)

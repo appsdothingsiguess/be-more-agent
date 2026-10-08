@@ -22,6 +22,7 @@
       <h1>BMO</h1>
       <span id="liveChip" class="chip">...</span>
       <span id="recon" class="hidden">reconnecting...</span>
+      <button class="ghost" id="newSession" type="button" aria-label="New session" title="New session: save this conversation and start fresh"><span aria-hidden="true">&#10010;</span><span class="lbl"> New session</span></button>
       <button class="ghost icon" id="gear" type="button" aria-label="Settings" aria-controls="sheet" aria-expanded="false">&#9881;</button>
     </header>
     <div id="banner" class="hidden" role="alert"><div id="bannerText"></div><button class="ghost" id="bannerX" type="button" aria-label="Dismiss">x</button></div>
@@ -81,6 +82,8 @@
       <h3>Memory</h3>
       <div class="row hidden" id="memToggleRow"><label for="s-mem">BMO remembers things</label><input id="s-mem" type="checkbox"></div>
       <p id="convCount" class="muted"></p>
+      <p id="sessInfo" class="muted"></p>
+      <div class="row hidden" id="row-idle"><label for="s-idle">Save to long-term memory after <span id="s-idle-v"></span> min idle (0 = never)</label><input id="s-idle" type="number" min="0" max="120" step="1"></div>
       <ul id="memList" class="memlist"></ul>
       <p id="memEmpty" class="muted"></p>
       <div class="row"><button id="forget" class="ghost" type="button">Forget everything</button></div>

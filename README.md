@@ -87,7 +87,7 @@ Edit `config.json` (copied from `config.example.json`). Any subset of keys overr
 | `microphone.backend` | `auto` | `stream` = one always-on capture shared by wake word, auto-stop and recording (auto picks it when the wake-word packages are installed); `file` = the old press-to-start/press-to-stop recording |
 | `listen.end_silence_seconds`, `.no_speech_timeout` | `0.9`, `6` | Auto-stop after this much silence; give up if nobody speaks |
 | `listen.followup`, `.followup_seconds` | `true`, `5` | After BMO answers out loud, listen again briefly without the wake word |
-| `memory.enabled`, `.max_messages`, `.max_chars` | `true`, `10`, `6000` | Conversation memory: recent exchanges (saved to `runtime/memory.json`) are sent with each turn, and the server's long-term recall is used. Saying or typing "forget everything" wipes both |
+| `memory.enabled`, `.max_messages`, `.max_chars`, `.session_idle_minutes` | `true`, `10`, `6000`, `5` | Conversation memory: recent exchanges (saved to `runtime/memory.json`) are sent with each turn, and the server's long-term recall is used. Saying or typing "forget everything" wipes both |
 
 Settings changed from the web page (volume, mute, camera mode, sound effects, mic boost, memory, wake word, follow-up) are saved to `runtime/settings.json` and override `config.json` at the next start.
 
@@ -158,6 +158,7 @@ The clips are generated with the server voice: `./venv/bin/python tools/make_err
 BMO remembers the last few exchanges. After every successful turn the Pi saves the user's words and BMO's reply (text only, never images) to `runtime/memory.json`, keeping the newest 10 messages (`memory.max_messages`, within `memory.max_chars`). Every turn sends them to the server as the `history` form field, so "what did I just ask?" works, also after a restart. Interrupted and failed turns are not saved.
 
 * **Long-term memory** (facts that outlive the last 10 messages) lives on the server, which recalls and stores them itself. The Pi only lists, deletes and wipes them through `/v1/bmo/memories`. Until the server has those routes the page says it is not set up yet, and nothing breaks.
+* **Sessions.** The full conversation is also kept as a session in `runtime/session.json` (up to 80 messages). When the session ends, the Pi sends it to the server (`POST /v1/bmo/memories/consolidate`) to be turned into long-term memories, then starts a fresh one (empty short-term memory and chat). A session ends after `memory.session_idle_minutes` (default 5, 0 = never) without activity, when you press **New session** on the web page, or when you say or type "new session", "new conversation", "start over" or "new chat". A session left over from before a restart is saved at startup if it is stale. If the server is unreachable the session waits in `runtime/pending_sessions/` (newest 20) and is retried later; if the server has no consolidate route it is dropped. Nothing is saved at shutdown, and "forget everything" discards the session and any pending ones.
 * **Forgetting.** Typing "forget everything" or "reset memory" (also with "BMO" first or "please" last) clears the Pi's history and asks the server to wipe long-term memory, without sending the phrase to the model. Saying it is handled by the server, which answers with `memory_reset` so the Pi clears its history too. The web page has a "Forget everything" button.
 * **Off switch.** `memory.enabled` (web page toggle) stops sending history and tells the server not to recall or store anything.
 * The server side is specified in `docs/bmo-memory-plan.md` in the server repo (`~/BMO/.worktrees/bmo-dual-gpu` on `3070server`).
@@ -169,7 +170,8 @@ While BMO runs (`--headless` or `--gui`), it serves a page from any device on th
 * **Talk:** a mic button (tap, speak, it stops by itself when you pause) and a text box. Browsers only allow the mic over HTTPS, so turn on `web.tls`.
 * **Reply audio, per device:** This device / BMO / Both / Text only, remembered by each browser. Wake-word replies never play on phones.
 * **Progress indicator:** what BMO is actually doing (listening, looking, thinking, getting the GPU ready, talking, playing here).
-* **Settings sheet (gear):** reply audio, BMO's speaker, listening (wake word, follow-up, mic boost), camera, memory (list, delete, forget everything), server status, log out.
+* **New session (header button):** saves the conversation to long-term memory and clears the chat; a line shows whether it was saved.
+* **Settings sheet (gear):** reply audio, BMO's speaker, listening (wake word, follow-up, mic boost), camera, memory (session size and idle save time, list, delete, forget everything), server status, log out.
 
 **HTTPS.** `"tls": "self_signed"` makes a certificate in `~/.config/bmo/tls/` naming this Pi's hostnames and addresses (remade if the address changes). Each browser shows a warning once; accept it. A real certificate (e.g. for a joeyspace.dev name) goes in with `"tls": "files"`.
 

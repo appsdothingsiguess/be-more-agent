@@ -1,3 +1,4 @@
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +40,9 @@ class FakeClient:
         self.calls = []
         self.error = None
         self.raw = {}
+        self.consolidated = []
+        self.consolidate_result = {"accepted": True}
+        self.consolidate_error = None
 
     def health(self):
         return {"ok": True}
@@ -62,6 +66,13 @@ class FakeClient:
     def forget_memories(self):
         self.log.append(("forget_memories",))
         return 3
+
+    def consolidate_memories(self, session_id, messages, reason, started_at, ended_at):
+        if self.consolidate_error:
+            raise self.consolidate_error
+        self.consolidated.append({"session_id": session_id, "messages": messages, "reason": reason,
+                                  "started_at": started_at, "ended_at": ended_at})
+        return self.consolidate_result
 
     def cancel(self, request_id):
         self.log.append(("cancel", request_id))
@@ -838,3 +849,216 @@ def test_health_retry_stops_on_shutdown(tmp_path):
     assert health_threads()
     ctl.shutdown()
     assert wait_for(lambda: not health_threads())
+
+
+# -- sessions -------------------------------------------------------------
+def events_of(rig, kind="session"):
+    got = []
+    rig.ctl.subscribe(lambda ev: got.append(ev) if ev["type"] == kind else None)
+    return got
+
+
+def session_ctl(tmp_path, client=None):
+    log = Log()
+    cfg = Config(runtime_dir=str(tmp_path / "runtime"))
+    client = client or FakeClient(log)
+    ctl = InteractionController(cfg, FakeUI(log), client, FakeReservation(log),
+                                FakeMic(log, None), FakeSpeaker(log))
+    return ctl, client
+
+
+def test_exchange_goes_to_session(rig):
+    run_text(rig, "one")
+    run_text(rig, "two")
+    assert len(rig.ctl.session) == 4
+    assert rig.ctl.session_info()["messages"] == 4
+    assert (Path(rig.cfg.runtime_dir) / "session.json").is_file()
+
+
+def test_new_session_consolidates_and_resets(rig):
+    run_text(rig, "one")
+    run_text(rig, "two")
+    old = rig.ctl.session.id
+    got = events_of(rig)
+    out = rig.ctl.new_session()
+    c = rig.client.consolidated[0]
+    assert c["session_id"] == old and c["reason"] == "new_session" and len(c["messages"]) == 4
+    assert c["started_at"].endswith("+00:00") and c["ended_at"].endswith("+00:00")
+    assert out["consolidated"] == "ok" and out["id"] == rig.ctl.session.id != old
+    assert got[0]["id"] == out["id"] and got[0]["reason"] == "new_session"
+    assert got[0]["consolidated"] == "ok"
+    assert rig.ctl.conversation() == [] and rig.ctl.session.is_empty
+    assert not any(e["type"] == "text" for e in rig.ctl.history)
+
+
+def test_new_session_unavailable_still_resets(rig):
+    run_text(rig)
+    rig.client.consolidate_result = None
+    out = rig.ctl.new_session()
+    assert out["consolidated"] == "unavailable"
+    assert rig.ctl.session.is_empty and rig.ctl.conversation() == []
+    assert not list(rig.ctl.pending_dir.glob("*.json"))
+
+
+def test_new_session_empty_is_skipped(rig):
+    assert rig.ctl.new_session()["consolidated"] == "skipped"
+    assert rig.client.consolidated == []
+
+
+def test_failure_goes_pending_then_retried(rig):
+    run_text(rig, "first")
+    first = rig.ctl.session.id
+    rig.client.consolidate_error = ServerUnavailable("down")
+    got = events_of(rig)
+    assert rig.ctl.end_session("new_session")["consolidated"] == "pending"
+    assert got[0]["consolidated"] == "pending"
+    assert [f.stem for f in rig.ctl.pending_dir.glob("*.json")] == [first]
+    rig.client.consolidate_error = None
+    run_text(rig, "second")
+    second = rig.ctl.session.id
+    assert rig.ctl.end_session("idle")["consolidated"] == "ok"
+    assert [c["session_id"] for c in rig.client.consolidated] == [second, first]
+    assert not list(rig.ctl.pending_dir.glob("*.json"))
+
+
+def test_pending_capped_at_twenty(rig):
+    rig.client.consolidate_error = ServerUnavailable("down")
+    ids = []
+    for _ in range(22):
+        rig.ctl.session.add_exchange("q", "a")
+        ids.append(rig.ctl.session.id)
+        rig.ctl.end_session("idle")
+        f = rig.ctl.pending_dir / f"{ids[-1]}.json"
+        if f.exists():
+            os.utime(f, (len(ids), len(ids)))
+    assert sorted(f.stem for f in rig.ctl.pending_dir.glob("*.json")) == sorted(ids[2:])
+
+
+def test_retry_pending_when_server_returns(rig):
+    rig.client.consolidate_error = ServerUnavailable("down")
+    rig.ctl.session.add_exchange("q", "a")
+    rig.ctl.end_session("idle")
+    assert len(list(rig.ctl.pending_dir.glob("*.json"))) == 1
+    assert rig.ctl._retry_pending() == 0
+    rig.client.consolidate_error = None
+    assert rig.ctl._retry_pending() == 1
+    assert not list(rig.ctl.pending_dir.glob("*.json"))
+
+
+def test_memory_disabled_skips_but_resets(rig):
+    rig.ctl.session.add_exchange("q", "a")
+    rig.cfg.memory.enabled = False
+    out = rig.ctl.end_session("new_session")
+    assert out["consolidated"] == "skipped" and rig.client.consolidated == []
+    assert rig.ctl.session.is_empty
+
+
+def test_idle_trigger(rig):
+    clock = [1000.0]
+    rig.ctl.session._clock = lambda: clock[0]
+    rig.ctl.session.last_activity = 1000.0
+    rig.ctl.session.add_exchange("q", "a")
+    assert rig.ctl._idle_tick() is False                  # fresh
+    clock[0] += 299
+    assert rig.ctl._idle_tick() is False
+    clock[0] += 2
+    assert rig.ctl._idle_tick() is True
+    assert rig.client.consolidated[0]["reason"] == "idle" and rig.ctl.session.is_empty
+
+
+def test_idle_disabled_busy_and_empty(rig):
+    clock = [0.0]
+    rig.ctl.session._clock = lambda: clock[0]
+    assert rig.ctl._idle_tick() is False                  # empty
+    rig.ctl.session.add_exchange("q", "a")
+    clock[0] = 10_000
+    rig.cfg.memory.session_idle_minutes = 0
+    assert rig.ctl._idle_tick() is False                  # disabled
+    rig.cfg.memory.session_idle_minutes = 5
+    rig.ctl._state = BotState.THINKING
+    assert rig.ctl._idle_tick() is False                  # mid-turn
+    rig.ctl._state = BotState.IDLE
+    assert rig.ctl._idle_tick() is True
+
+
+def test_idle_thread_runs(rig):
+    rig.ctl._session_stop.set()
+    rig.ctl._session_thread.join(2)
+    rig.ctl._session_stop.clear()
+    rig.ctl.session_poll = 0.02
+    rig.ctl.session.add_exchange("q", "a")
+    rig.ctl.session.last_activity = rig.ctl.session.last_activity - 3600
+    rig.ctl._start_session_thread()
+    wait_for(lambda: rig.client.consolidated)
+    assert rig.client.consolidated and rig.client.consolidated[0]["reason"] == "idle"
+    rig.ctl.shutdown()
+
+
+def test_turn_start_touches_activity(rig):
+    rig.ctl.session.last_activity = 0.0
+    run_text(rig)
+    assert rig.ctl.session.idle_seconds() < 5
+
+
+def test_startup_consolidates_stale_leftover(tmp_path):
+    first, _ = session_ctl(tmp_path)
+    first.session.add_exchange("old q", "old a")
+    first.session.last_activity -= 3600
+    first.session._save()
+    old = first.session.id
+    ctl, client = session_ctl(tmp_path)
+    assert ctl.session.id == old
+    ctl.start()
+    wait_for(lambda: client.consolidated)
+    assert client.consolidated[0]["session_id"] == old and client.consolidated[0]["reason"] == "startup"
+    assert ctl.session.id != old
+    ctl.shutdown()
+
+
+def test_startup_keeps_recent_session(tmp_path):
+    a, _ = session_ctl(tmp_path)
+    a.session.add_exchange("q", "a")
+    b, client = session_ctl(tmp_path)
+    b.start()
+    assert b.session.id == a.session.id and client.consolidated == []
+    b.shutdown()
+
+
+def test_forget_clears_session_and_pending(rig):
+    rig.client.consolidate_error = ServerUnavailable("down")
+    rig.ctl.session.add_exchange("q", "a")
+    rig.ctl.end_session("idle")
+    rig.ctl.session.add_exchange("q2", "a2")
+    old = rig.ctl.session.id
+    assert list(rig.ctl.pending_dir.glob("*.json"))
+    rig.ctl.forget_memory()
+    assert rig.ctl.session.is_empty and rig.ctl.session.id != old
+    assert not list(rig.ctl.pending_dir.glob("*.json"))
+
+
+def test_typed_new_session_command(rig):
+    run_text(rig)
+    assert rig.ctl.submit_text("Hey BMO, new session please!") is None
+    wait_for(lambda: rig.client.consolidated)
+    assert rig.client.consolidated and len(rig.client.calls) == 1
+    assert ("user", "Hey BMO, new session please!") in rig.ui.texts
+    assert ("bmo", "Okay! Fresh start.") in rig.ui.texts
+
+
+def test_spoken_new_session_command(rig):
+    run_text(rig, "earlier")
+    orig = rig.client.interact
+
+    def interact(**kw):
+        r = orig(**kw)
+        r.transcript = "Start over."
+        return r
+    rig.client.interact = interact
+    old = rig.ctl.session.id
+    got = events_of(rig)
+    run_text(rig, "x")
+    wait_for(lambda: got)
+    assert got and got[0]["reason"] == "new_session"
+    assert rig.client.consolidated[0]["session_id"] == old
+    assert len(rig.client.consolidated[0]["messages"]) == 2     # the command was not stored
+    assert rig.ctl.conversation() == []
