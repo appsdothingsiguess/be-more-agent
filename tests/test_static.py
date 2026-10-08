@@ -62,3 +62,10 @@ def test_js_ids_exist_in_html():
 def test_worklet_name_matches():
     assert 'registerProcessor("bmo-mic"' in (STATIC / "mic-worklet.js").read_text()
     assert '"bmo-mic"' in (STATIC / "app.js").read_text()
+
+
+def test_new_session_ui_present():
+    html = (STATIC / "index.html").read_text()
+    js = (STATIC / "app.js").read_text()
+    assert 'id="newSession"' in html and "New session" in html
+    assert "/api/session/new" in js and 'case "session"' in js

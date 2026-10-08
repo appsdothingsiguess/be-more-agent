@@ -178,6 +178,7 @@ class MemoryConfig:
     max_messages: int = 10
     max_chars: int = 6000
     file: str = "memory.json"  # relative to runtime_dir
+    session_idle_minutes: float = 5.0  # idle time that ends a session and saves it to long-term memory; 0 = never
 
 
 @dataclass
@@ -277,6 +278,8 @@ def validate(cfg: Config) -> Config:
         raise ConfigError("memory.max_messages must be 2-10")
     if int(cfg.memory.max_chars) <= 0:
         raise ConfigError("memory.max_chars must be positive")
+    if float(cfg.memory.session_idle_minutes) < 0:
+        raise ConfigError("memory.session_idle_minutes must not be negative")
     actions = {"up", "down", "left", "right", "a", "b", "start", "quit"}
     bad = {k: v for k, v in cfg.input.keymap.items() if v not in actions}
     if bad:

@@ -463,3 +463,49 @@ def test_origin_check(web, sess):
     r = requests.post(web.base + "/api/login", json={"pin": PIN},
                       headers={"Origin": "http://evil.example"})
     assert r.status_code == 403
+
+
+# -- sessions -------------------------------------------------------------
+class SessionController(FakeController):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.new_sessions = 0
+
+    def new_session(self):
+        self.new_sessions += 1
+        return {"id": "abc", "reason": "new_session", "consolidated": "ok"}
+
+    def session_info(self):
+        return {"id": "abc", "started_at": 1.0, "messages": 4}
+
+
+@pytest.fixture
+def sesweb(web):
+    web.ctrl = web.controller = SessionController(web.cfg)
+    return web
+
+
+def test_session_new_requires_login(sesweb):
+    assert requests.post(sesweb.base + "/api/session/new", json={}).status_code == 401
+    assert sesweb.ctrl.new_sessions == 0
+
+
+def test_session_new_origin_checked(sesweb, sess):
+    r = sess.post(sesweb.base + "/api/session/new", json={}, headers={"Origin": "http://evil.example"})
+    assert r.status_code == 403 and sesweb.ctrl.new_sessions == 0
+
+
+def test_session_new_ok(sesweb, sess):
+    r = sess.post(sesweb.base + "/api/session/new", json={}, headers={"Origin": sesweb.base})
+    assert r.status_code == 200
+    assert r.json() == {"id": "abc", "reason": "new_session", "consolidated": "ok"}
+    assert sesweb.ctrl.new_sessions == 1
+
+
+def test_session_in_state(sesweb, sess):
+    assert sess.get(sesweb.base + "/api/state").json()["session"]["messages"] == 4
+
+
+def test_session_new_unsupported(web, sess):
+    assert sess.post(web.base + "/api/session/new", json={}).status_code == 501
+    assert "session" not in sess.get(web.base + "/api/state").json()

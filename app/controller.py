@@ -19,6 +19,11 @@ Event feed (dicts passed to subscribers, each also carries "time"). Schema:
   turn_done  {turn, source, client_id, ok, spoke_on_pi}   once per turn, also on interrupt
   live       {armed, model, error, ...}           published by others via publish(); sticky
   setting    {key, value}                         after a live setting is applied
+  session    {id, reason, consolidated}           a conversation session ended and a fresh one
+               started (id = the NEW session). reason: new_session|idle|startup.
+               consolidated: ok (saved to long-term memory) | pending (server unreachable,
+               kept on disk and retried) | unavailable (server has no consolidate route) |
+               skipped (memory off or nothing said). Clients should clear their chat view.
 ``history`` (replayed to new clients) holds only text and error events;
 ``snapshot()`` returns the sticky last phase and live events.
 """
@@ -30,6 +35,7 @@ import logging
 import threading
 import time
 import wave
+import json
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,7 +44,8 @@ from typing import Any, Callable
 from app.config import Config
 from app.hardware.camera import CameraError
 from app.hardware.input import Action
-from app.memory import ConversationMemory, is_forget_command
+from app.memory import (ConversationMemory, ConversationSession, is_forget_command,
+                        is_new_session_command, iso, write_json_atomic)
 from app.replies import ReplyStore
 from app.notify import ERRORS, NOTICES, SERVER_CODES, SOFT, clip_path
 from app.server.errors import (AuthError, BadResponse, BMOError, RequestCancelled,
@@ -56,6 +63,8 @@ PHASES = {
     BotState.SPEAKING: "speaking", BotState.ERROR: "error",
 }
 HEALTH_BACKOFF = (5.0, 60.0)  # first retry delay, cap (seconds)
+SESSION_POLL = 15.0            # how often the idle thread checks the session (seconds)
+MAX_PENDING_SESSIONS = 20
 
 
 @dataclass
@@ -111,6 +120,13 @@ class InteractionController:
         self.memory = ConversationMemory(cfg.runtime_path / cfg.memory.file,
                                          cfg.memory.max_messages, cfg.memory.max_chars)
         self._memory_epoch = 0  # bumped by every clear; a turn started before one is not stored
+        self.session = ConversationSession(cfg.runtime_path / "session.json")
+        self.pending_dir = cfg.runtime_path / "pending_sessions"
+        self.session_poll = SESSION_POLL        # tests may shorten it
+        self._session_lock = threading.Lock()   # snapshot + reset of the session
+        self._pending_lock = threading.Lock()   # pending_sessions/ files
+        self._session_thread: threading.Thread | None = None
+        self._session_stop = threading.Event()
         ReplyStore.purge_legacy(cfg.runtime_path)
         self.replies = ReplyStore(cfg.runtime_path / "replies", keep=8)
 
@@ -275,6 +291,8 @@ class InteractionController:
     def start(self) -> None:
         """Warm up: hardware setup + server health. Does not reserve the GPU."""
         self._set_state(BotState.WARMUP, "Waking up...")
+        self._start_session_thread()
+        self._startup_session()
         try:
             self.mic.configure()
         except Exception as e:  # mixer problems never block startup
@@ -292,6 +310,130 @@ class InteractionController:
             return
         self._set_state(BotState.IDLE, self.idle_hint)
         self._greet()
+
+    # --------------------------------------------------------------- sessions
+    def _start_session_thread(self) -> None:
+        with self._lock:
+            if self._closed or (self._session_thread is not None and self._session_thread.is_alive()):
+                return
+            t = threading.Thread(target=self._session_loop, name="bmo-session-idle", daemon=True)
+            self._session_thread = t
+        t.start()
+
+    def _session_loop(self) -> None:
+        while not self._session_stop.wait(self.session_poll):
+            try:
+                self._idle_tick()
+            except Exception:
+                log.exception("Session idle check failed")
+
+    def _idle_limit(self) -> float:
+        return float(self.cfg.memory.session_idle_minutes) * 60
+
+    def _idle_tick(self) -> bool:
+        """End the session if it has been quiet for session_idle_minutes. True if it ended."""
+        limit = self._idle_limit()
+        if limit <= 0 or self._closed or self.session.is_empty:
+            return False
+        if self._state not in (BotState.IDLE, BotState.ERROR) or self._turn is not None:
+            return False
+        if self.session.idle_seconds() < limit:
+            return False
+        self.end_session("idle")
+        return True
+
+    def _startup_session(self) -> None:
+        """A leftover session from before a restart is consolidated once it is stale."""
+        limit = self._idle_limit()
+        if limit > 0 and not self.session.is_empty and self.session.idle_seconds() >= limit:
+            threading.Thread(target=self.end_session, args=("startup",),
+                             name="bmo-consolidate", daemon=True).start()
+
+    def session_info(self) -> dict:
+        return {"id": self.session.id, "started_at": self.session.started_at,
+                "messages": len(self.session)}
+
+    def new_session(self) -> dict:
+        """Interrupt whatever is going on, save the conversation and start a fresh one."""
+        self._preempt()
+        return self.end_session("new_session")
+
+    def end_session(self, reason: str) -> dict:
+        """Consolidate the finished session into long-term memory, then start a new one.
+        Always starts a fresh session (clearing short-term memory and the chat history).
+        Never raises."""
+        out: dict = {"id": None, "reason": reason, "consolidated": "skipped"}
+        try:
+            with self._session_lock:
+                snap = self.session.to_dict()
+                snap["ended_at"] = self.session._clock()
+                out["id"] = self.session.reset()
+                self._clear_memory()
+            self.history.clear()
+            if self.cfg.memory.enabled and snap["messages"]:
+                out["consolidated"] = self._consolidate(snap, reason)
+            if self.cfg.memory.enabled:
+                self._retry_pending()
+        except Exception:
+            log.exception("Ending session failed")
+        self.publish({"type": "session", "id": out["id"] or self.session.id,
+                      "reason": reason, "consolidated": out["consolidated"]})
+        return out
+
+    @staticmethod
+    def _payload(snap: dict, reason: str) -> dict:
+        return {"session_id": snap["id"], "reason": reason, "messages": snap["messages"],
+                "started_at": iso(snap["started_at"]), "ended_at": iso(snap["ended_at"])}
+
+    def _consolidate(self, snap: dict, reason: str) -> str:
+        payload = self._payload(snap, reason)
+        try:
+            res = self.client.consolidate_memories(**payload)
+        except Exception as e:
+            log.warning("Consolidating session %s failed, keeping it for later: %s", snap["id"], e)
+            self._save_pending(payload)
+            return "pending"
+        return "unavailable" if res is None else "ok"
+
+    def _save_pending(self, payload: dict) -> None:
+        with self._pending_lock:
+            write_json_atomic(self.pending_dir / f"{payload['session_id']}.json", payload,
+                              ".pending-")
+            files = self._pending_files()
+            for old in files[:-MAX_PENDING_SESSIONS]:
+                old.unlink(missing_ok=True)
+
+    def _pending_files(self) -> list[Path]:
+        try:
+            files = [f for f in self.pending_dir.glob("*.json") if f.is_file()]
+            return sorted(files, key=lambda f: (f.stat().st_mtime, f.name))
+        except OSError:
+            return []
+
+    def _retry_pending(self) -> int:
+        """Send saved sessions to the server, oldest first; stops at the first failure."""
+        sent = 0
+        with self._pending_lock:
+            for f in self._pending_files():
+                try:
+                    payload = json.loads(f.read_text())
+                    res = self.client.consolidate_memories(**payload)
+                except (OSError, ValueError, TypeError):
+                    f.unlink(missing_ok=True)      # unreadable: nothing to retry
+                    continue
+                except Exception as e:
+                    log.info("Pending session retry failed: %s", e)
+                    break
+                if res is None:
+                    break                          # server has no route; keep them
+                f.unlink(missing_ok=True)
+                sent += 1
+        return sent
+
+    def _discard_pending(self) -> None:
+        with self._pending_lock:
+            for f in self._pending_files():
+                f.unlink(missing_ok=True)
 
     def _greet(self) -> None:
         if not self.cfg.ui.text_only and self.cfg.sounds.enabled and self.cfg.sounds.greeting:
@@ -319,6 +461,8 @@ class InteractionController:
                 log.info("Server still unreachable: %s", e)
                 delay = min(delay * 2, cap)
                 continue
+            if self.cfg.memory.enabled:
+                self._retry_pending()
             if self._state is not BotState.ERROR:
                 return                      # something else already recovered
             if self._turn is not None:
@@ -382,6 +526,11 @@ class InteractionController:
             threading.Thread(target=self.forget_memory, name="bmo-forget", daemon=True).start()
             self._show("Okay! BMO forgot everything.", "bmo")
             return None
+        if is_new_session_command(text):
+            self._show(text, "user")
+            threading.Thread(target=self.new_session, name="bmo-session", daemon=True).start()
+            self._show("Okay! Fresh start.", "bmo")
+            return None
         turn = self._new_turn(speak, play_on_pi, source, client_id)
         self._spawn(turn, text=text)
         return turn.id
@@ -416,6 +565,9 @@ class InteractionController:
         out: dict = {"local_cleared": True, "server": "ok", "forgotten": None}
         try:
             self._clear_memory()
+            with self._session_lock:
+                self.session.reset()
+            self._discard_pending()
         except Exception:
             log.exception("Clearing local memory failed")
         try:
@@ -462,12 +614,14 @@ class InteractionController:
             unchanged = epoch == self._memory_epoch
         if use_memory and unchanged and question and result.text:
             self.memory.add_exchange(question, result.text)
+            self.session.add_exchange(question, result.text)
 
     # -------------------------------------------------------------- listening
     def start_listening(self, source: str = "button") -> bool:
         """Start recording on the Pi mic. Only from IDLE/ERROR; source is button|wake|followup."""
         if source not in LISTEN_SOURCES or self._closed:
             return False
+        self.session.touch()
         with self._lock:
             if self._state not in (BotState.IDLE, BotState.ERROR):
                 return False
@@ -616,6 +770,7 @@ class InteractionController:
         with self._lock:
             epoch = self._memory_epoch
         use_memory = self.cfg.memory.enabled
+        self.session.touch()
         ok = spoke = False
         try:
             if record:
@@ -669,13 +824,18 @@ class InteractionController:
                 log.info("Dropping response for interrupted request %s", request_id)
                 return
             self.reservation.renewed()
-            self._remember(result, text, use_memory, epoch)
+            end_session = bool(result.transcript) and is_new_session_command(result.transcript)
+            if not end_session:
+                self._remember(result, text, use_memory, epoch)
 
             self.last_transcript = result.transcript or text
             self.last_reply = result.text
             if self.last_transcript:
                 self._show(self.last_transcript, "user")
             self._show(result.text, "bmo")
+            if end_session:
+                threading.Thread(target=self.end_session, args=("new_session",),
+                                 name="bmo-session", daemon=True).start()
             set_emotion = getattr(self.ui, "set_emotion", None)
             if set_emotion is not None:
                 set_emotion(result.emotion)     # the face keeps it while BMO talks
@@ -734,6 +894,7 @@ class InteractionController:
         self._closed = True
         self._cancel_listen_timer()
         self._health_stop.set()
+        self._session_stop.set()
         if self._state is BotState.LISTENING:
             try:
                 self.mic.abort()

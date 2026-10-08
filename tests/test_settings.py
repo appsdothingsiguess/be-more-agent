@@ -97,3 +97,12 @@ def test_wake_and_followup_settings(tmp_path):
         with pytest.raises(SettingError):
             set_setting(cfg, key, bad)
     assert current(cfg)["listen.followup_seconds"] == 8.0
+
+
+def test_session_idle_minutes_setting():
+    cfg = Config()
+    assert set_setting(cfg, "memory.session_idle_minutes", 0) == 0
+    assert set_setting(cfg, "memory.session_idle_minutes", 7.5) == 7.5
+    for bad in (-1, 121, "x", True, None):
+        with pytest.raises(SettingError):
+            set_setting(cfg, "memory.session_idle_minutes", bad)

@@ -56,6 +56,7 @@ class FakeBMOServer:
         self.memory_routes = True  # False = the server predates memory (404)
         self.memories: list[dict] = [{"id": 1, "content": "likes tea", "type": "fact",
                                       "created_at": "2026-01-01"}]
+        self.consolidate_status = 200
         self.interact_extra: dict = {}
         self.cancelled = threading.Event()
         self.interact_started = threading.Event()
@@ -165,6 +166,8 @@ class FakeBMOServer:
             if m == "DELETE":
                 n, self.memories = len(self.memories), []
                 return 200, {"forgotten": n}, None
+        if p == "/v1/bmo/memories/consolidate" and m == "POST" and self.memory_routes:
+            return self.consolidate_status, {"accepted": True, "stored": 2}, None
         mem = re.fullmatch(r"/v1/bmo/memories/(\d+)", p)
         if mem and m == "DELETE" and self.memory_routes:
             keep = [x for x in self.memories if x["id"] != int(mem.group(1))]

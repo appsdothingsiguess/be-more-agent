@@ -66,6 +66,18 @@ def _followup_seconds(value: Any) -> float:
     return n
 
 
+def _idle_minutes(value: Any) -> float:
+    if isinstance(value, bool):
+        raise SettingError("session idle time must be 0-120 minutes")
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        raise SettingError("session idle time must be a number of minutes") from None
+    if not 0 <= n <= 120:
+        raise SettingError("session idle time must be 0-120 minutes")
+    return n
+
+
 # dotted config path -> validator returning the normalised value
 SETTINGS: dict[str, Callable[[Any], Any]] = {
     "speaker.volume": _volume,
@@ -74,6 +86,7 @@ SETTINGS: dict[str, Callable[[Any], Any]] = {
     "sounds.enabled": _bool,
     "microphone.gain_db": _gain,
     "memory.enabled": _bool,
+    "memory.session_idle_minutes": _idle_minutes,
     "wake_word.enabled": _bool,
     "listen.followup": _bool,
     "listen.followup_seconds": _followup_seconds,
