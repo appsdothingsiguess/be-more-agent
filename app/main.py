@@ -43,6 +43,38 @@ def build_components(cfg):
     return client, reservation, mic, speaker, camera
 
 
+def use_stream_backend(cfg) -> bool:
+    """Stream (shared always-on capture) vs file recording. Auto = stream when deps exist."""
+    backend = cfg.microphone.backend
+    if backend == "stream":
+        return True
+    if backend == "auto":
+        import importlib.util
+        return (importlib.util.find_spec("openwakeword") is not None
+                and importlib.util.find_spec("onnxruntime") is not None)
+    return False
+
+
+def build_live(cfg, mic):
+    """Stream backend: returns (capture, StreamMicrophone); listener is built after the controller."""
+    from app.audio.capture import AudioCapture
+    from app.hardware.stream_mic import StreamMicrophone
+
+    capture = AudioCapture(cfg, publish=None)
+    return capture, StreamMicrophone(cfg, capture, file_mic=mic)
+
+
+def _make_listener(cfg, controller, capture):
+    from app.audio.vad import make_vad
+    from app.audio.wakeword import WakeDetector
+    from app.config import APP_ROOT
+    from app.live import LiveListener
+
+    return LiveListener(cfg, controller, capture,
+                        detector_factory=lambda: WakeDetector(cfg.wake_word, APP_ROOT),
+                        vad_factory=lambda: make_vad(cfg.listen))
+
+
 def _start_evdev(cfg, controller):
     """Feed USB HID keyboards (e.g. the Feather buttons) into the controller."""
     if not cfg.input.evdev_enabled:
@@ -86,7 +118,15 @@ def run_interactive(cfg, use_gui: bool) -> int:
         from app.ui.headless import HeadlessUI
         ui = HeadlessUI()
 
+    capture = listener = None
+    if use_stream_backend(cfg):
+        capture, mic = build_live(cfg, mic)
     controller = InteractionController(cfg, ui, client, reservation, mic, speaker, camera)
+    if capture is not None:
+        capture.publish = controller.publish
+        capture.start()
+        listener = _make_listener(cfg, controller, capture)
+        listener.start()
     atexit.register(controller.shutdown)
     stop = threading.Event()
 
@@ -113,6 +153,10 @@ def run_interactive(cfg, use_gui: bool) -> int:
             # Service mode (systemd): no stdin; buttons only. Wait for SIGTERM.
             stop.wait()
     finally:
+        if listener is not None:
+            listener.stop()
+        if capture is not None:
+            capture.stop()
         if reader is not None:
             reader.stop()
         if web is not None:
