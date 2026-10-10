@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+import io
 import json
 import logging
 import os
 import re
 import time
 import uuid
+import wave
 from dataclasses import dataclass, replace
 from urllib.parse import quote
 from typing import Any, Callable
@@ -94,6 +96,33 @@ def clean_seconds(value) -> float | None:
     return float(value)
 
 
+def join_wavs(pieces: list) -> bytes | None:
+    """Streamed reply pieces (WAVs of one format) as one WAV, for saving and the web page.
+    A piece that is unreadable or in another format is left out."""
+    params, frames = None, []
+    for data in pieces:
+        try:
+            with wave.open(io.BytesIO(data)) as w:
+                p = (w.getnchannels(), w.getsampwidth(), w.getframerate())
+                if params is None:
+                    params = p
+                if p == params:
+                    frames.append(w.readframes(w.getnframes()))
+                    continue
+        except (wave.Error, EOFError):
+            pass
+        log.warning("Skipping a reply audio piece that does not match")
+    if params is None:
+        return None
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(params[0])
+        w.setsampwidth(params[1])
+        w.setframerate(params[2])
+        w.writeframes(b"".join(frames))
+    return out.getvalue()
+
+
 def clean_memory_changes(value) -> tuple:
     return tuple({"op": c["op"], "name": str(c.get("name") or "")}
                  for c in (value if isinstance(value, list) else ())
@@ -125,6 +154,7 @@ class InteractResult:
     song: str | None = None    # mood when BMO sang (the song is in audio_wav)
     memory_changes: tuple = ()  # {"op": create|update|delete, "name"}
     music_start_s: float | None = None  # where the appended music track starts in audio_wav
+    audio_streamed: bool = False  # audio_wav was sent in audio_chunk events (joined here)
 
 
 class BMOClient:
@@ -284,10 +314,14 @@ class BMOClient:
         history: list[dict] | None = None,
         memory: bool | None = None,
         on_event: Callable[[dict], None] | None = None,
+        audio_stream: bool = False,
     ) -> InteractResult:
         """One BMO turn. With on_event the reply is streamed: on_event gets each event as it
         happens (transcript, status, song, and actions as {"type": "action", "action": Action})
-        and the final result is returned as usual. Exceptions from on_event abort the turn."""
+        and the final result is returned as usual. Exceptions from on_event abort the turn.
+        With audio_stream too, the reply audio comes early in pieces: on_event gets
+        {"type": "reply", "text", "emotion", "song"} and then each
+        {"type": "audio_chunk", "index", "audio": bytes}; the result's audio_wav joins them."""
         if not text and not audio_path:
             raise ValueError("interact requires text or audio_path")
         rid = request_id or self.new_request_id()
@@ -301,6 +335,8 @@ class BMOClient:
             files["memory"] = (None, "on" if memory else "off")
         if on_event is not None:
             files["stream"] = (None, "true")
+            if audio_stream and speak:
+                files["audio_stream"] = (None, "true")
         handles = []
         try:
             if audio_path:
@@ -329,6 +365,7 @@ class BMOClient:
     def _read_stream(self, r: requests.Response, rid: str,
                      on_event: Callable[[dict], None]) -> InteractResult:
         streamed: list[Action] = []
+        pieces: dict[int, bytes] = {}
         try:
             for line in r.iter_lines(decode_unicode=True):
                 if not line or not line.startswith("data:"):
@@ -345,6 +382,9 @@ class BMOClient:
                     result = self._result(ev, rid, r.status_code)
                     if streamed:   # the result repeats sounds without their audio
                         result = replace(result, actions=tuple(streamed))
+                    if pieces and result.audio_wav is None:
+                        result = replace(result, audio_streamed=True,
+                                         audio_wav=join_wavs([pieces[i] for i in sorted(pieces)]))
                     return result
                 if kind == "error":
                     self._raise_stream_error(ev)
@@ -355,9 +395,30 @@ class BMOClient:
                         on_event({"type": "action", "action": action})
                 elif kind in ("transcript", "status", "song"):
                     on_event(ev)
+                elif kind == "reply":
+                    on_event({"type": "reply", "text": str(ev.get("text") or ""),
+                              "emotion": clean_emotion(ev.get("emotion")),
+                              "song": clean_song(ev.get("song"))})
+                elif kind == "audio_chunk":
+                    piece = self._audio_piece(ev)
+                    if piece is not None and piece[0] not in pieces:
+                        pieces[piece[0]] = piece[1]
+                        on_event({"type": "audio_chunk", "index": piece[0], "audio": piece[1]})
         except (requests.ConnectionError, requests.Timeout) as e:
             raise ServerUnavailable(f"{type(e).__name__} reading reply stream") from e
         raise BadResponse("reply stream ended without a result", status=r.status_code)
+
+    @staticmethod
+    def _audio_piece(ev: dict) -> tuple[int, bytes] | None:
+        index = ev.get("index")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            log.warning("Skipping reply audio piece without an index")
+            return None
+        try:
+            return index, base64.b64decode(ev.get("audio_wav_base64") or "", validate=True)
+        except (binascii.Error, ValueError, TypeError):
+            log.warning("Skipping reply audio piece %d: bad base64", index)
+            return None
 
     @staticmethod
     def _raise_stream_error(ev: dict) -> None:

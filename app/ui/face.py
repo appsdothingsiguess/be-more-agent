@@ -5,6 +5,7 @@ No Tk here. FaceAnimator.tick(now) advances the face; the GUI draws face.draw_op
 from __future__ import annotations
 
 import array
+import io
 import math
 import random
 import wave
@@ -43,9 +44,10 @@ FLAP_S = 0.22                       # random flapping when there is no audio dat
 
 
 def envelope_from_wav(path, window_s: float = ENV_WINDOW_S) -> tuple[list, float]:
-    """Loudness per window of a 16-bit WAV, scaled 0..1. Returns ([], window) if unreadable."""
+    """Loudness per window of a 16-bit WAV (a path, or the file's bytes), scaled 0..1.
+    Returns ([], window) if unreadable."""
     try:
-        with wave.open(str(path), "rb") as w:
+        with wave.open(io.BytesIO(path) if isinstance(path, bytes) else str(path), "rb") as w:
             if w.getsampwidth() != 2:
                 return [], window_s
             ch, rate = w.getnchannels(), w.getframerate()
@@ -163,6 +165,9 @@ class FaceAnimator:
         self._move_start = self._move_end = 0.0
         self.overlay: str | None = None     # song | music: notes (and lyrics) over the face
         self.lyrics: list = []
+        # Seconds into the speech where each line starts (a streamed song); None = spread
+        # the lines evenly over the audio.
+        self.lyric_starts: list | None = None
         self.caption = ""                   # status text while BMO works
         self._shown: str | None = None      # face action, any state
         self._shown_until = 0.0
@@ -195,7 +200,7 @@ class FaceAnimator:
         if state != BotState.THINKING:
             self.caption = ""
         if state in (BotState.IDLE, BotState.ERROR, BotState.LISTENING):
-            self.overlay, self.lyrics = None, []
+            self.overlay, self.lyrics, self.lyric_starts = None, [], None
 
     def set_emotion(self, name: str | None, now: float) -> None:
         if name is not None and name not in self.faces:
@@ -238,11 +243,25 @@ class FaceAnimator:
         self.caption = text or ""
         self.dirty = True
 
+    def time_lyrics(self) -> None:
+        """A streamed song: no words until add_lyric_start() says when the first line is."""
+        self.lyric_starts = []
+
+    def add_lyric_start(self, seconds: float) -> None:
+        """A streamed song: the next lyric line starts this many seconds into the audio."""
+        if self.lyric_starts is None:
+            self.lyric_starts = []
+        self.lyric_starts.append(seconds)
+
     def lyric(self, now: float) -> str:
-        """The lyric line for now: the lines spread evenly over the reply audio."""
+        """The lyric line for now: at its start time when known (a streamed song has one
+        piece per line), else the lines spread evenly over the reply audio."""
         if not self.lyrics or self.state != BotState.SPEAKING or self.speech_start is None:
             return ""
         n, elapsed = len(self.lyrics), max(0.0, now - self.speech_start)
+        if self.lyric_starts is not None:
+            i = sum(1 for t in self.lyric_starts[:n] if t <= elapsed)
+            return self.lyrics[i - 1] if i else ""
         total = len(self.envelope) * self.window
         per = total / n if total > 0 else LYRIC_FALLBACK_S
         return self.lyrics[min(n - 1, int(elapsed / per))]
@@ -288,6 +307,15 @@ class FaceAnimator:
     def prepare_speech(self, envelope: list, window: float = ENV_WINDOW_S) -> None:
         """Hand over the reply's loudness just before set_state(SPEAKING)."""
         self._pending_envelope = (envelope, window)
+        self.lyric_starts = None
+
+    def append_speech(self, envelope: list) -> None:
+        """Streamed reply audio: the next piece's loudness, played right after the last."""
+        if self.state == BotState.SPEAKING:
+            self.envelope = self.envelope + list(envelope)
+        elif self._pending_envelope is not None:
+            env, window = self._pending_envelope
+            self._pending_envelope = (env + list(envelope), window)
 
     # ----- per-frame
 

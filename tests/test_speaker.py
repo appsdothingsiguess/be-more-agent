@@ -92,3 +92,42 @@ def test_replugged_speaker_is_redetected_and_volume_reapplied(tmp_path):
     assert sp.card == "UACDemoV10" and mixer[-1][:3] == ["amixer", "-c", "UACDemoV10"]
     sp.play("b.wav")
     assert len(mixer) == 1  # unchanged device: no extra mixer calls
+
+
+def _stream_speaker(tmp_path, cmd):
+    argvs = []
+
+    def popen(argv, **kw):
+        argvs.append(argv)
+        return subprocess.Popen(cmd, **kw)
+    return Speaker(SpeakerConfig(), tmp_path, popen=popen, cards=CARDS), argvs
+
+
+def test_stream_writes_pieces_into_one_aplay(tmp_path):
+    out = tmp_path / "out.raw"
+    sp, argvs = _stream_speaker(tmp_path, ["sh", "-c", f"cat > {out}"])
+    s = sp.open_stream(22050, 1)
+    assert s.write(b"ab") and s.write(b"cd")
+    assert s.close()
+    assert out.read_bytes() == b"abcd" and len(argvs) == 1
+    assert argvs[0] == ["aplay", "-q", "-D", "plughw:CARD=UACDemoV10,DEV=0", "-t", "raw",
+                        "-f", "S16_LE", "-r", "22050", "-c", "1"]
+    assert not sp.is_playing
+
+
+def test_stop_ends_a_stream(tmp_path):
+    sp, _ = _stream_speaker(tmp_path, ["sleep", "5"])
+    s = sp.open_stream(22050)
+    sp.stop()
+    assert not s.write(b"ab")
+    t0 = time.time()
+    assert not s.close() and time.time() - t0 < 2
+
+
+def test_stream_abort_spares_a_newer_sound(tmp_path):
+    sp, _ = _stream_speaker(tmp_path, ["sleep", "5"])
+    s = sp.open_stream(22050)
+    assert sp.play("ding.wav", block=False)
+    s.abort()
+    assert sp.is_playing     # the sound started after the stream keeps playing
+    sp.stop()

@@ -194,6 +194,8 @@ class Config:
     # Reservation lifetime is 300 s server-side; renew before reuse after this long.
     reservation_renew_after: float = 240.0
     runtime_dir: str = "runtime"
+    # Ask for the reply audio in pieces as it is made, and play them as they come.
+    audio_stream: bool = True
 
     microphone: MicrophoneConfig = field(default_factory=MicrophoneConfig)
     speaker: SpeakerConfig = field(default_factory=SpeakerConfig)

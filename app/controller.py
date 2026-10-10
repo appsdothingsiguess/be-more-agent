@@ -90,6 +90,9 @@ class Turn:
     heard: str | None = None        # transcript already shown from the stream
     anims: "_Lane | None" = None    # expression and face actions, one after another
     sounds: "_Lane | None" = None   # sound actions, one after another, alongside the anims
+    reply_stream: "_ReplyStream | None" = None   # reply audio arriving in pieces
+    reply_shown: str | None = None  # reply text already shown from the stream
+    faced: bool = False             # the reply's face (or singing screen) is queued
 
 
 class _Lane:
@@ -132,6 +135,167 @@ class _Lane:
                 log.exception("%s: playback failed", self._name)
             finally:
                 self._q.task_done()
+
+
+class _ReplyStream:
+    """Streamed reply audio (audio_stream): the pieces play in index order, back to back,
+    through one open speaker stream, so a song cut on bar lines has no gaps. Playback
+    starts with the first piece once the turn's sounds have played; pieces arriving
+    meanwhile wait. A piece still missing when its turn comes is waited for, never
+    skipped, unless the reply is complete without it."""
+
+    def __init__(self, ctl: "InteractionController", turn: Turn, gen: int):
+        self._ctl, self._turn, self._gen = ctl, turn, gen
+        self._cond = threading.Condition()
+        self._pieces: dict[int, bytes] = {}
+        self._complete = False
+        self._music_start: float | None = None
+        self._music_thread = False
+        self._started_at: float | None = None
+        self._out = None
+        self.ok = False
+        self.done = threading.Event()
+        threading.Thread(target=self._run, name=f"bmo-reply-{gen}", daemon=True).start()
+
+    def add(self, index: int, wav: bytes) -> None:
+        with self._cond:
+            self._pieces[index] = wav
+            self._cond.notify_all()
+
+    def finish(self, music_start_s: float | None) -> None:
+        """All pieces are in (the result came)."""
+        with self._cond:
+            self._complete = True
+            self._music_start = music_start_s
+            self._cond.notify_all()
+        self._start_music()
+
+    def wait(self) -> bool:
+        """Block until the reply has played; False if interrupted or it failed."""
+        while not self.done.wait(0.05):
+            if self._ctl._stale(self._gen):
+                return False
+        return self.ok
+
+    def abort(self) -> None:
+        with self._cond:
+            self._complete = True
+            self._cond.notify_all()
+        out = self._out
+        if out is not None and not self.done.is_set():
+            out.abort()
+
+    @property
+    def started(self) -> bool:
+        return self._started_at is not None
+
+    def _alive(self) -> bool:
+        return not self._ctl._stale(self._gen)
+
+    def _start_music(self) -> None:
+        """At music_start_s (from the first piece) the track begins: the music screen."""
+        with self._cond:
+            if self._music_start is None or self._started_at is None or self._music_thread:
+                return
+            self._music_thread = True
+            left = self._music_start - (time.monotonic() - self._started_at)
+        threading.Thread(target=self._ctl._music_show, args=(max(0.0, left), self._gen, self.done),
+                         name=f"bmo-music-{self._gen}", daemon=True).start()
+
+    def _next(self, index: int) -> tuple[int, bytes] | None:
+        """(index, piece) once that piece is here, or the next one when the reply is
+        complete without it; None when the reply ends first (or the turn is stale)."""
+        with self._cond:
+            while index not in self._pieces:
+                if not self._alive():
+                    return None
+                if self._complete:
+                    later = [i for i in self._pieces if i > index]
+                    if not later:
+                        return None
+                    log.warning("Reply audio piece %d never came; going on", index)
+                    index = min(later)
+                    break
+                self._cond.wait(0.05)
+            return index, self._pieces.pop(index)
+
+    def _run(self) -> None:
+        ctl, turn, gen = self._ctl, self._turn, self._gen
+        try:
+            self._play(ctl, turn, gen)
+        except Exception:
+            log.exception("Streamed reply playback failed")
+        finally:
+            out, self._out = self._out, None
+            if out is not None:
+                if self._alive():
+                    self.ok = out.close() and self.ok
+                else:
+                    out.abort()
+            self.done.set()
+
+    def _play(self, ctl: "InteractionController", turn: Turn, gen: int) -> None:
+        if not ctl._drain(turn.sounds, gen):
+            return
+        got = self._next(0)
+        if got is None:
+            return
+        index, first = got
+        try:
+            with wave.open(io.BytesIO(first)) as w:
+                fmt = (w.getnchannels(), w.getsampwidth(), w.getframerate())
+                pcm = w.readframes(w.getnframes())
+        except (wave.Error, EOFError):
+            log.error("Reply audio: first piece is not a WAV")
+            return
+        if fmt[1] != 2:
+            log.error("Reply audio: %d-byte samples, expected 16-bit", fmt[1])
+            return
+        prepare = getattr(ctl.ui, "prepare_speech", None)
+        if prepare is not None:
+            prepare(first)              # lets the face follow the reply's loudness
+        time_lyrics = getattr(ctl.ui, "time_lyrics", None) if turn.song else None
+        if time_lyrics is not None:
+            time_lyrics()               # each line shows when its piece starts playing
+        if not ctl._set_state(BotState.SPEAKING, "", gen):
+            return
+        self._out = ctl.speaker.open_stream(fmt[2], fmt[0])
+        if self._out is None:
+            return
+        log.info("Reply audio starts (streamed)")
+        with self._cond:
+            self._started_at = time.monotonic()
+        self._start_music()
+        append = getattr(ctl.ui, "append_speech", None)
+        lyric_start = getattr(ctl.ui, "add_lyric_start", None) if turn.song else None
+        offset = 0.0
+        while True:
+            if pcm and not self._out.write(pcm):
+                return              # stopped (button, wake word or a new sound)
+            offset += len(pcm) / (2 * fmt[0] * fmt[2])
+            got = self._next(index + 1)
+            if got is None:
+                break
+            index, piece = got
+            pcm = self._pcm(piece, fmt, index)
+            if not pcm:
+                continue
+            if append is not None:
+                append(piece)
+            if lyric_start is not None:
+                lyric_start(offset)     # a song: one piece per line after the opening bar
+        self.ok = self._alive()
+
+    @staticmethod
+    def _pcm(piece: bytes, fmt: tuple, index: int) -> bytes:
+        try:
+            with wave.open(io.BytesIO(piece)) as w:
+                if (w.getnchannels(), w.getsampwidth(), w.getframerate()) == fmt:
+                    return w.readframes(w.getnframes())
+        except (wave.Error, EOFError):
+            pass
+        log.warning("Reply audio piece %d is unreadable or in another format; skipped", index)
+        return b""
 
 
 class _Stale(Exception):
@@ -941,7 +1105,38 @@ class InteractionController:
                 turn.song = str(ev.get("mood") or "happy")
             elif kind == "action":
                 self._queue_action(ev["action"], turn, gen)
+            elif kind == "reply":
+                turn.song = ev.get("song") or turn.song
+                text = str(ev.get("text") or "")
+                if text:
+                    turn.reply_shown = text
+                    self._show(text, "bmo")
+                self._reply_face(turn, ev.get("emotion") or "neutral", turn.song, text)
+            elif kind == "audio_chunk":
+                if turn.play_on_pi and not self.cfg.ui.text_only:
+                    if turn.reply_stream is None:
+                        turn.reply_stream = _ReplyStream(self, turn, gen)
+                    turn.reply_stream.add(ev["index"], ev["audio"])
         return on_event
+
+    def _reply_face(self, turn: Turn, emotion: str, song: str | None, text: str) -> None:
+        """The reply's face (or the singing screen), once the face show's animations are
+        done; the animations left keep playing over the speech."""
+        if turn.faced:
+            return
+        turn.faced = True
+
+        def show():
+            set_emotion = getattr(self.ui, "set_emotion", None)
+            if set_emotion is not None:
+                set_emotion(emotion)    # after a face show, back to the reply's face
+            if song:
+                self._overlay(song, False, text)
+
+        if turn.anims is not None and turn.anims.busy:
+            turn.anims.put(show)
+        else:
+            show()
 
     def _overlay(self, song: str | None, music: bool, text: str) -> None:
         """Singing screen (notes + lyrics) or music screen while the reply plays."""
@@ -1020,6 +1215,9 @@ class InteractionController:
             try:
                 extra = ({"history": self.memory.messages(), "memory": True}
                          if use_memory else {"memory": False})
+                if (self.cfg.audio_stream and speak and turn.play_on_pi
+                        and not self.cfg.ui.text_only):
+                    extra["audio_stream"] = True    # play the reply as it is made
                 result = self.client.interact(text=text, audio_path=audio, image_path=image,
                                               speak=speak, request_id=request_id,
                                               on_event=self._stream_handler(turn, gen), **extra)
@@ -1042,7 +1240,8 @@ class InteractionController:
             self.last_reply = result.text
             if self.last_transcript and self.last_transcript != turn.heard:
                 self._show(self.last_transcript, "user")
-            self._show(result.text, "bmo")
+            if result.text != turn.reply_shown:
+                self._show(result.text, "bmo")
             if end_session:
                 threading.Thread(target=self.end_session, args=("new_session",),
                                  name="bmo-session", daemon=True).start()
@@ -1059,18 +1258,7 @@ class InteractionController:
                 return
             song = getattr(result, "song", None) or turn.song
             music_start_s = getattr(result, "music_start_s", None)
-
-            def after_animations():
-                set_emotion = getattr(self.ui, "set_emotion", None)
-                if set_emotion is not None:
-                    set_emotion(result.emotion)     # after a face show, back to the reply's face
-                if song:
-                    self._overlay(song, False, result.text)
-
-            if turn.anims is not None and turn.anims.busy:
-                turn.anims.put(after_animations)
-            else:
-                after_animations()
+            self._reply_face(turn, getattr(result, "emotion", "neutral"), song, result.text)
 
             reply = None
             if result.audio_wav:
@@ -1078,7 +1266,16 @@ class InteractionController:
                 self._emit({"type": "audio", "turn": turn.id, "url": f"/api/audio/{turn.id}.wav",
                             "client_id": turn.client_id, "source": turn.source,
                             "duration": self._wav_duration(result.audio_wav)})
-            if reply is not None and turn.play_on_pi:
+            if turn.reply_stream is not None:
+                # Already playing piece by piece; now every piece is in.
+                if turn.music and music_start_s is None and not song:
+                    self._overlay(None, True, "")   # older server: no start time, music screen now
+                turn.reply_stream.finish(music_start_s)
+                turn.reply_stream.wait()
+                spoke = turn.reply_stream.started
+                if self._stale(gen):
+                    return
+            elif reply is not None and turn.play_on_pi:
                 prepare = getattr(self.ui, "prepare_speech", None)
                 if prepare is not None:
                     prepare(reply)          # lets the face follow the reply's loudness
@@ -1133,6 +1330,8 @@ class InteractionController:
             for lane in (turn.anims, turn.sounds):
                 if lane is not None:
                     lane.close()
+            if turn.reply_stream is not None:
+                turn.reply_stream.abort()       # no-op once it has played
             self._finish_turn(turn, ok, spoke)
             if own_audio and audio is not None:
                 self._delete(audio)

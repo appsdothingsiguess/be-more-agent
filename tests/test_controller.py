@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -134,6 +135,8 @@ class FakeSpeaker:
         self.block = None
         self.playing = threading.Event()
         self._stop = threading.Event()
+        self.streams = []
+        self.stream_play_s = 0.0
 
     def play(self, path, block=True):
         self.played.append(Path(path))
@@ -159,6 +162,39 @@ class FakeSpeaker:
     def stop(self):
         self.log.append(("speaker_stop",))
         self._stop.set()
+
+    def open_stream(self, rate, channels=1):
+        self._stop.clear()
+        self.log.append(("stream", rate))
+        st = FakeStream(self)
+        self.streams.append(st)
+        return st
+
+
+class FakeStream:
+    """An open speaker stream: logs each write; close() 'plays' for play_s seconds, or
+    until stop() when play_s is None."""
+
+    def __init__(self, spk):
+        self.spk, self.writes, self.closed, self.aborted = spk, [], False, False
+
+    def write(self, pcm):
+        if self.spk._stop.is_set():
+            return False
+        self.writes.append((time.monotonic(), pcm))
+        return True
+
+    def close(self):
+        self.closed = True
+        if self.spk.stream_play_s is None:
+            self.spk._stop.wait(5)
+        else:
+            self.spk._stop.wait(self.spk.stream_play_s)
+        self.spk.log.append(("stream_end", time.monotonic()))
+        return not self.spk._stop.is_set()
+
+    def abort(self):
+        self.aborted = True
 
 
 class FakeCamera:
@@ -1375,3 +1411,111 @@ def test_save_memory(rig):
                                                       "error": "too long"}
     rig.client.put_memory = lambda n, t, c: None
     assert rig.ctl.save_memory("dog", "pet", "x")["available"] is False
+
+
+def _wav_piece(secs, amp):
+    import io
+    import wave
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(22050)
+        w.writeframes(amp.to_bytes(2, "little", signed=True) * int(22050 * secs))
+    return out.getvalue()
+
+
+def _pcm_amps(stream):
+    return [int.from_bytes(pcm[:2], "little", signed=True) for _, pcm in stream.writes]
+
+
+def _chunks(*pieces, order=None):
+    order = order if order is not None else range(len(pieces))
+    return [{"type": "audio_chunk", "index": i, "audio": pieces[i]} for i in order]
+
+
+def test_streamed_reply_plays_pieces_back_to_back_in_order(rig):
+    """audio_stream: the pieces go, in index order, into one open speaker stream."""
+    pieces = [_wav_piece(0.1, 100), _wav_piece(0.1, 200), _wav_piece(0.1, 300)]
+    rig.client.stream = [{"type": "reply", "text": "reply to req-1", "emotion": "happy"},
+                         *_chunks(*pieces, order=[1, 0, 2])]
+    run_text(rig)
+    assert rig.client.calls[0]["audio_stream"] is True
+    [st] = rig.spk.streams
+    assert ("stream", 22050) in rig.log and _pcm_amps(st) == [100, 200, 300] and st.closed
+    assert not any(e[0] == "play" for e in rig.log)     # no second, whole-file playback
+    assert rig.ui.texts.count(("bmo", "reply to req-1")) == 1
+    assert BotState.SPEAKING in rig.ui.states and rig.ui.states[-1] == BotState.IDLE
+
+
+def test_streamed_reply_waits_for_the_sound_queue(rig):
+    from app.server.client import Action
+    sound_end = []
+
+    def play(path, block=True):
+        time.sleep(0.3)
+        sound_end.append(time.monotonic())
+        return True
+    rig.spk.play = play
+    rig.client.stream = [{"type": "action", "action": Action("sound", "coin", b"COIN")},
+                         {"type": "reply", "text": "hi", "emotion": "happy"},
+                         *_chunks(_wav_piece(0.1, 100))]
+    run_text(rig)
+    [st] = rig.spk.streams
+    assert st.writes[0][0] >= sound_end[0]
+
+
+def test_streamed_song_times_each_lyric_line_to_its_piece(rig):
+    """A song comes as an opening bar, one piece per sung line, then an outro bar."""
+    rig.ui.set_overlay = lambda kind, lyrics=(): rig.log.append(("overlay", kind, list(lyrics)))
+    rig.ui.time_lyrics = lambda: rig.log.append(("time_lyrics",))
+    rig.ui.add_lyric_start = lambda s: rig.log.append(("lyric_at", round(s, 3)))
+    pieces = [_wav_piece(0.1, 1), _wav_piece(0.2, 2), _wav_piece(0.2, 3), _wav_piece(0.1, 4)]
+    rig.client.stream = [{"type": "reply", "text": "La la\nFinn", "emotion": "happy",
+                          "song": "silly"}, *_chunks(*pieces)]
+    run_text(rig)
+    assert ("overlay", "song", ["La la", "Finn"]) in rig.log
+    assert ("time_lyrics",) in rig.log
+    assert [e[1] for e in rig.log if e[0] == "lyric_at"] == [0.1, 0.3, 0.5]
+
+
+def test_streamed_music_screen_at_music_start(rig):
+    rig.ui.play_expression = _timed(rig, "expression", 0.1)
+    rig.ui.set_overlay = lambda kind, lyrics=(): rig.log.append(("overlay", kind, time.monotonic()))
+    rig.spk.stream_play_s = 0.8
+    rig.client.stream = [_act("music", "dance_party"),
+                         {"type": "reply", "text": "hi", "emotion": "happy"},
+                         *_chunks(_wav_piece(0.1, 1), _wav_piece(0.1, 2))]
+    rig.client.extra = {"music_start_s": 0.3}
+    run_text(rig)
+    time.sleep(0.2)
+    [st] = rig.spk.streams
+    start = st.writes[0][0]
+    end = next(e[1] for e in rig.log if e[0] == "stream_end")
+    overlay = [e for e in rig.log if e[0] == "overlay"]
+    dances = [e[2] for e in rig.log if e[0] == "expression" and e[1] == "dance"]
+    assert len(overlay) == 1 and overlay[0][1] == "music" and overlay[0][2] - start >= 0.29
+    assert dances and all(start + 0.29 <= t <= end + 0.01 for t in dances)
+
+
+def test_interrupt_stops_a_streamed_reply(rig):
+    rig.spk.stream_play_s = None        # plays until stopped
+    rig.client.stream = [{"type": "reply", "text": "a long story", "emotion": "happy"},
+                         *_chunks(_wav_piece(0.1, 1))]
+    rig.ctl.submit_text("tell me a story")
+    deadline = time.monotonic() + 5
+    while not (rig.spk.streams and rig.spk.streams[0].closed) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    rig.ctl.interrupt()
+    assert rig.ctl.wait_idle(2)
+    assert ("speaker_stop",) in rig.log
+
+
+def test_no_audio_stream_when_the_pi_does_not_play_it(rig):
+    rig.ctl.submit_text("hi", speak=True, play_on_pi=False)
+    assert rig.client.entered.wait(5) and rig.ctl.wait_idle(5)
+    assert "audio_stream" not in rig.client.calls[0]
+    rig.cfg.audio_stream = False
+    rig.client.entered.clear()
+    run_text(rig)
+    assert "audio_stream" not in rig.client.calls[1]

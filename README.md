@@ -67,6 +67,7 @@ Edit `config.json` (copied from `config.example.json`). Any subset of keys overr
 | Key | Default | Meaning |
 |---|---|---|
 | `server_url` | `http://192.168.0.240:8765` | Home server |
+| `audio_stream` | `true` | Play the reply audio in pieces while the server is still making it (speech starts sooner, songs play without gaps); `false` waits for the whole WAV |
 | `token_file` | `/etc/bmo/token` | Credential file |
 | `model` | `bmo-qwen3-vl-8b` | Server model name |
 | `microphone.device` / `.match` / `.fallback_device` | `auto` / `USB PnP Sound Device` / `plughw:1,0` | Mic selection |

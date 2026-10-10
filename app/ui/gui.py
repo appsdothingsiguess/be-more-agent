@@ -321,6 +321,24 @@ class TkUI:
         env, window = envelope_from_wav(wav_path)
         self._post(lambda: self.animator.prepare_speech(env, window))
 
+    def append_speech(self, wav: bytes) -> None:
+        """Streamed reply audio: the next piece's WAV, so the mouth follows it too."""
+        if self.animator is None:
+            return
+        from app.ui.face import envelope_from_wav
+        env, _ = envelope_from_wav(wav)
+        self._post(lambda: self.animator.append_speech(env))
+
+    def time_lyrics(self) -> None:
+        """A streamed song: lyric lines show at the times add_lyric_start() gives."""
+        if self.animator is not None:
+            self._post(self.animator.time_lyrics)
+
+    def add_lyric_start(self, seconds: float) -> None:
+        """A streamed song: the next lyric line starts this many seconds into the audio."""
+        if self.animator is not None:
+            self._post(lambda: self.animator.add_lyric_start(seconds))
+
     def set_emotion(self, name: str | None) -> None:
         """Show an emotion ('happy', 'sad', ...) on the idle/speaking face for a few seconds."""
         if self.animator is not None:

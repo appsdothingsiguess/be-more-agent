@@ -106,6 +106,25 @@ class Speaker:
             stopped = self._gen != gen
         return rc == 0 and not stopped
 
+    def open_stream(self, rate: int, channels: int = 1) -> "SpeakerStream | None":
+        """One aplay kept open for raw 16-bit PCM written piece by piece, so pieces play
+        back to back with no gap. stop() (or any new play) ends it like any playback."""
+        self.refresh()
+        with self._lock:
+            self._gen += 1
+            self._kill(self._proc)
+            self._proc = None
+            try:
+                proc = self._popen(
+                    ["aplay", "-q", "-D", self.resolved.device, "-t", "raw", "-f", "S16_LE",
+                     "-r", str(rate), "-c", str(channels)],
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError as e:
+                log.warning("aplay failed to start: %s", e)
+                return None
+            self._proc = proc
+            return SpeakerStream(self, proc, self._gen)
+
     def play_bytes(self, data: bytes, path, *, block: bool = True) -> bool:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -119,3 +138,46 @@ class Speaker:
     def play_effect(self, category: str) -> bool:
         sound = self.random_sound(category)
         return self.play(sound, block=False) if sound else False
+
+
+class SpeakerStream:
+    """An open aplay from Speaker.open_stream(). write() returns False once playback was
+    stopped; close() lets the queued audio play out and says whether it played to the end."""
+
+    def __init__(self, speaker: Speaker, proc, gen: int):
+        self._speaker, self._proc, self._gen = speaker, proc, gen
+
+    @property
+    def stopped(self) -> bool:
+        return self._speaker._gen != self._gen
+
+    def write(self, pcm: bytes) -> bool:
+        if self.stopped:
+            return False
+        try:
+            self._proc.stdin.write(pcm)
+            self._proc.stdin.flush()
+            return True
+        except (BrokenPipeError, OSError, ValueError):
+            return False
+
+    def close(self) -> bool:
+        try:
+            self._proc.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+        rc = self._proc.wait()
+        sp = self._speaker
+        with sp._lock:
+            if sp._proc is self._proc:
+                sp._proc = None
+        return rc == 0 and not self.stopped
+
+    def abort(self) -> None:
+        """Stop this stream only; a sound started since then keeps playing."""
+        sp = self._speaker
+        with sp._lock:
+            if sp._proc is self._proc:
+                sp._gen += 1
+                sp._proc = None
+        sp._kill(self._proc)

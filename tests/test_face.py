@@ -453,3 +453,40 @@ def test_gui_overlay_shows_notes_lyrics_and_caption(faces):
     a.set_state(BotState.IDLE, 9.0)
     ui._draw_face()
     assert not visible("text") and not visible("rect")
+
+
+def test_streamed_song_shows_each_line_at_its_piece(faces):
+    a = face.FaceAnimator(faces, random.Random(5))
+    a.set_state(BotState.THINKING, 0)
+    a.set_overlay("song", ["La la", "Finn is a dog"])
+    a.prepare_speech([0.5] * 25, 0.04)       # the opening bar: 1 s
+    a.time_lyrics()
+    a.set_state(BotState.SPEAKING, 10.0)
+    assert a.lyric(10.5) == ""               # music first, no words yet
+    a.append_speech([0.5] * 50)
+    a.add_lyric_start(1.0)
+    a.append_speech([0.5] * 50)
+    a.add_lyric_start(3.0)
+    a.append_speech([0.1] * 25)              # the outro bar
+    a.add_lyric_start(5.0)                   # more pieces than lines: ignored
+    assert len(a.envelope) == 150
+    assert a.lyric(11.5) == "La la"
+    assert a.lyric(13.5) == "Finn is a dog"
+    assert a.lyric(15.5) == "Finn is a dog"
+    a.set_state(BotState.IDLE, 16.0)
+    assert a.lyric_starts is None
+
+
+def test_speech_appended_before_speaking_joins_the_pending_envelope(faces):
+    a = face.FaceAnimator(faces, random.Random(5))
+    a.prepare_speech([0.5] * 2, 0.04)
+    a.append_speech([0.2] * 3)
+    a.set_state(BotState.SPEAKING, 0.0)
+    assert a.envelope == [0.5, 0.5, 0.2, 0.2, 0.2]
+
+
+def test_envelope_from_wav_bytes(tmp_path):
+    from tests.wavutil import make_wav
+    make_wav(tmp_path / "a.wav", rate=22050, secs=0.4)
+    env, window = face.envelope_from_wav((tmp_path / "a.wav").read_bytes())
+    assert env and env == face.envelope_from_wav(tmp_path / "a.wav")[0]

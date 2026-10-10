@@ -387,3 +387,61 @@ def test_put_memory(server, client):
     assert e.value.status == 422 and "sentences" in e.value.detail
     server.memory_routes = False
     assert client.put_memory("x", "fact", "Hi.") is None
+
+
+def _piece(secs, amp=1000):
+    import io
+    import wave
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(22050)
+        w.writeframes(amp.to_bytes(2, "little", signed=True) * int(22050 * secs))
+    return out.getvalue()
+
+
+def _audio_stream_server(server, pieces):
+    server.interact_audio_b64 = None    # with audio_stream the result has no whole WAV
+    server.interact_extra = {"emotion": "happy", "audio_chunks": len(pieces),
+                             "audio_seconds": 0.3, "music_start_s": 0.2}
+    server.stream_events = [
+        {"type": "reply", "text": "hi there", "emotion": "happy", "song": "silly"},
+        *({"type": "audio_chunk", "index": i, "audio_wav_base64": base64.b64encode(p).decode()}
+          for i, p in enumerate(pieces)),
+    ]
+
+
+def test_audio_stream_pieces_then_joined_result(server, client):
+    pieces = [_piece(0.1), _piece(0.2, amp=2000)]
+    _audio_stream_server(server, pieces)
+    seen = []
+    r = client.interact(text="hi", on_event=seen.append, audio_stream=True)
+    assert server.find("POST", "/v1/bmo/interact")[-1]["values"]["audio_stream"] == "true"
+    assert seen[0] == {"type": "reply", "text": "hi there", "emotion": "happy", "song": "silly"}
+    assert [(e["type"], e["index"], e["audio"]) for e in seen[1:]] == \
+        [("audio_chunk", 0, pieces[0]), ("audio_chunk", 1, pieces[1])]
+    # The whole reply is still there for saving and the web page.
+    import io
+    import wave
+    with wave.open(io.BytesIO(r.audio_wav)) as w:
+        assert w.getframerate() == 22050 and w.getnframes() == int(22050 * 0.1) + int(22050 * 0.2)
+    assert r.audio_streamed and r.music_start_s == 0.2
+
+
+def test_audio_stream_only_asked_when_speaking(server, client):
+    _audio_stream_server(server, [_piece(0.1)])
+    client.interact(text="hi", on_event=lambda e: None, audio_stream=True, speak=False)
+    assert "audio_stream" not in server.find("POST", "/v1/bmo/interact")[-1]["values"]
+    client.interact(text="hi", audio_stream=True)    # no stream, no audio_stream
+    assert "audio_stream" not in server.find("POST", "/v1/bmo/interact")[-1]["values"]
+
+
+def test_bad_audio_pieces_are_skipped(server, client):
+    _audio_stream_server(server, [_piece(0.1)])
+    server.stream_events += [{"type": "audio_chunk", "index": "x", "audio_wav_base64": "AAAA"},
+                             {"type": "audio_chunk", "index": 1, "audio_wav_base64": "!!"}]
+    seen = []
+    r = client.interact(text="hi", on_event=seen.append, audio_stream=True)
+    assert [e["index"] for e in seen if e["type"] == "audio_chunk"] == [0]
+    assert r.audio_wav is not None and r.audio_streamed
