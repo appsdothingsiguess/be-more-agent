@@ -298,36 +298,40 @@ function connect(){
 }
 
 // ---- reply playback ----
-var actx=null, curSrc=null, playSeq=0;
-function ctx(){
-  if(!actx){var C=window.AudioContext||window.webkitAudioContext;if(C)actx=new C()}
-  return actx;
+// One <audio> element, unlocked in a tap. Not an AudioContext: on iPhone, using the
+// mic switches the audio session and leaves a playback AudioContext "interrupted",
+// and a reply arrives without a tap that could resume it.
+var player=null, playSeq=0, playerUnlocked=false;
+var SILENT="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=";
+function audioEl(){
+  if(!player){player=new Audio();player.preload="auto";player.setAttribute("playsinline","")}
+  return player;
 }
-function unlock(){var c=ctx();if(c&&c.state==="suspended")c.resume()}
+function unlock(){
+  if(playerUnlocked||playingHere)return;
+  var a=audioEl();
+  a.src=SILENT;
+  var p=a.play();
+  if(p&&p.then)p.then(function(){playerUnlocked=true;if(!playingHere)a.pause()}).catch(function(){});
+}
 ["pointerdown","keydown","touchend"].forEach(function(n){document.addEventListener(n,unlock,{passive:true})});
 function stopLocal(){
   playSeq++;
-  if(curSrc){try{curSrc.onended=null;curSrc.stop()}catch(e){}curSrc=null}
+  if(player){player.onended=player.onerror=null;try{player.pause()}catch(e){}}
   if(playingHere){playingHere=false;renderIndicator()}
 }
 function playReply(url){
-  var c=ctx();if(!c)return;
+  var a=audioEl();
   stopLocal();
   var seq=playSeq;
   playingHere=true;renderIndicator();
-  fetch(url,{credentials:"same-origin"}).then(function(r){
-    if(!r.ok)throw new Error("audio "+r.status);return r.arrayBuffer();
-  }).then(function(buf){
-    return new Promise(function(res,rej){c.decodeAudioData(buf,res,rej)});
-  }).then(function(ab){
-    if(seq!==playSeq)return;
-    var src=c.createBufferSource();src.buffer=ab;src.connect(c.destination);
-    src.onended=function(){if(curSrc===src){curSrc=null;playingHere=false;renderIndicator()}};
-    curSrc=src;
-    if(c.state==="suspended")c.resume();
-    src.start();
-  }).catch(function(){
-    if(seq===playSeq){playingHere=false;renderIndicator()}
+  function done(){if(seq===playSeq){playingHere=false;renderIndicator()}}
+  a.onended=done;a.onerror=done;
+  a.src=url;
+  var p=a.play();
+  if(p&&p.catch)p.catch(function(){
+    done();
+    if(seq===playSeq)$("sendErr").textContent="Tap anywhere, then the reply can play on this device.";
   });
 }
 
