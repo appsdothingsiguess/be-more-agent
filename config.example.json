@@ -86,6 +86,7 @@
     "no_speech_timeout": 6.0,
     "followup": true,
     "followup_seconds": 5.0,
+    "followup_min_speech_seconds": 0.15,
     "preroll_seconds": 0.4,
     "auto_stop_button": true,
     "mute_tail_seconds": 0.6,

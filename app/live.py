@@ -55,6 +55,7 @@ class LiveListener:
         self._mode = ARMED
         self._endpointer: Endpointer | None = None
         self._turn_source: str | None = None
+        self._turn_start = -1e9      # frames captured before this belong to no turn
         self._mute_until: float | None = None
         self._followup_pending = False
         self._last_wake = -1e9
@@ -81,6 +82,7 @@ class LiveListener:
 
     # -- inputs (any thread) -----------------------------------------------
     def _on_frame(self, frame) -> None:
+        frame = (self._clock(), frame)      # when it arrived, to drop stale frames later
         try:
             self._frames.put_nowait(frame)
         except queue.Full:
@@ -104,16 +106,17 @@ class LiveListener:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                frame = self._frames.get(timeout=0.2)
+                at, frame = self._frames.get(timeout=0.2)
             except queue.Empty:
-                frame = None
+                at = frame = None
             try:
-                self.step(frame)
+                self.step(frame, at)
             except Exception:
                 log.exception("Live listener step failed")
 
     # -- logic (worker thread; tests call step() directly) -----------------
-    def step(self, frame=None) -> None:
+    def step(self, frame=None, at: float | None = None) -> None:
+        """at = when the frame was captured (None: now)."""
         self._drain_events()
         if self._dirty:
             self._dirty = False
@@ -147,7 +150,10 @@ class LiveListener:
         if frame is None:
             return
         if self._mode == TURN:
-            self._turn_frame(frame)
+            # The wake model's reset takes ~0.6 s on the Pi, so frames queue up meanwhile.
+            # Those predate the turn (the tail of BMO's own reply): never endpoint on them.
+            if at is None or at >= self._turn_start:
+                self._turn_frame(frame)
         elif self._mode == ARMED:
             self._armed_frame(frame, now, state)
 
@@ -207,9 +213,11 @@ class LiveListener:
             self._vad = self._vad_factory()
         self._vad.reset()
         self._turn_source = source
+        self._turn_start = self._clock()
         self._mode = TURN
+        min_speech = self.cfg.listen.followup_min_speech_seconds if source == "followup" else 0.0
         self._endpointer = Endpointer(self.capture.frame_s, self.cfg.listen.end_silence_seconds,
-                                      no_speech, self.cfg.microphone.max_seconds)
+                                      no_speech, self.cfg.microphone.max_seconds, min_speech)
 
     def _turn_frame(self, frame) -> None:
         result = self._endpointer.feed(self._vad.is_speech(frame))

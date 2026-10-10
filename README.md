@@ -87,6 +87,7 @@ Edit `config.json` (copied from `config.example.json`). Any subset of keys overr
 | `microphone.backend` | `auto` | `stream` = one always-on capture shared by wake word, auto-stop and recording (auto picks it when the wake-word packages are installed); `file` = the old press-to-start/press-to-stop recording |
 | `listen.end_silence_seconds`, `.no_speech_timeout` | `0.9`, `6` | Auto-stop after this much silence; give up if nobody speaks |
 | `listen.followup`, `.followup_seconds` | `true`, `5` | After BMO answers out loud, listen again briefly without the wake word |
+| `listen.followup_min_speech_seconds` | `0.15` | In a follow-up, sounds shorter than this (clicks, echo) are ignored instead of ending the turn |
 | `memory.enabled`, `.max_messages`, `.max_chars`, `.session_idle_minutes` | `true`, `10`, `6000`, `30` | Conversation memory: recent exchanges (saved to `runtime/memory.json`) are sent with each turn, and the server's long-term recall is used. Saying or typing "forget everything" wipes both |
 
 Settings changed from the web page (volume, mute, camera mode, sound effects, mic boost, memory, wake word, follow-up) are saved to `runtime/settings.json` and override `config.json` at the next start.

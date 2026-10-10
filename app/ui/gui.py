@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 SPEAK_FRAME_MS = 50
 FRAME_MS = 500
 SVG_FRAME_MS = 33
+FRAME_STATS_S = 10.0     # how often the face loop checks its own frame rate
 # The touch panel sends stray short taps; only a deliberate hold toggles the text box.
 LONG_PRESS_MS = 1000
 
@@ -118,12 +119,36 @@ class TkUI:
     def _update_face(self) -> None:
         if self._closed:
             return
+        start = time.monotonic()
         try:
-            if self.animator.tick(time.monotonic()):
+            if self.animator.tick(start):
                 self._draw_face()
         except Exception:
             log.exception("Face animation failed")
+        self._frame_stats(start, time.monotonic() - start)
         self.root.after(SVG_FRAME_MS, self._update_face)
+
+    def _frame_stats(self, start: float, cost: float) -> None:
+        """Log the face's frame rate when it falls behind (gaps between frames well
+        over SVG_FRAME_MS), so a laggy display shows up in the journal with numbers."""
+        st = getattr(self, "_fstats", None)
+        if st is None:
+            st = self._fstats = {"since": start, "last": start, "n": 0, "gap": 0.0,
+                                 "cost": 0.0, "worst": 0.0}
+        st["gap"] = max(st["gap"], start - st["last"])
+        st["last"] = start
+        st["n"] += 1
+        st["cost"] += cost
+        st["worst"] = max(st["worst"], cost)
+        span = start - st["since"]
+        if span < FRAME_STATS_S:
+            return
+        fps = st["n"] / span
+        if fps < 0.75 * 1000 / SVG_FRAME_MS or st["gap"] > 0.25:
+            log.warning("Face rendering slow: %.0f fps, longest gap %.0f ms, draw avg %.1f ms "
+                        "max %.0f ms (state %s)", fps, st["gap"] * 1000,
+                        st["cost"] / st["n"] * 1000, st["worst"] * 1000, self.state.value)
+        self._fstats = None
 
     def _draw_face(self) -> None:
         a, canvas = self.animator, self.canvas

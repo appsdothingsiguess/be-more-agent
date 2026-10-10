@@ -49,3 +49,16 @@ def test_make_vad_falls_back_to_energy(monkeypatch):
         raise RuntimeError("no model")
     monkeypatch.setattr(v, "SileroVAD", boom)
     assert isinstance(make_vad(type("L", (), {"vad": "silero"})()), EnergyVAD)
+
+
+def test_short_blip_does_not_end_the_turn():
+    ep = Endpointer(0.1, 0.3, 1.0, 30, min_speech=0.2)
+    out = run(ep, [True, False, False, False, False])     # 0.1 s blip, then silence
+    assert "end" not in out
+    assert run(ep, [False] * 5)[-1] == "timeout"          # still gives up on time
+
+
+def test_real_speech_after_a_blip_ends_normally():
+    ep = Endpointer(0.1, 0.3, 5, 30, min_speech=0.2)
+    out = run(ep, [True, False, False, False, True, True, True, False, False, False])
+    assert out[0] == "onset" and out[4] == "onset" and out[-1] == "end"

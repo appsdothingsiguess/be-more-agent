@@ -165,6 +165,7 @@ class ListenConfig:
     no_speech_timeout: float = 6.0
     followup: bool = True
     followup_seconds: float = 5.0
+    followup_min_speech_seconds: float = 0.15  # shorter sounds don't end a follow-up
     preroll_seconds: float = 0.4
     auto_stop_button: bool = True
     mute_tail_seconds: float = 0.6
@@ -271,7 +272,7 @@ def validate(cfg: Config) -> Config:
     for name in ("end_silence_seconds", "no_speech_timeout", "followup_seconds"):
         if float(getattr(listen, name)) <= 0:
             raise ConfigError(f"listen.{name} must be positive")
-    for name in ("preroll_seconds", "mute_tail_seconds"):
+    for name in ("preroll_seconds", "mute_tail_seconds", "followup_min_speech_seconds"):
         if float(getattr(listen, name)) < 0:
             raise ConfigError(f"listen.{name} must not be negative")
     if not 2 <= int(cfg.memory.max_messages) <= 10:

@@ -302,7 +302,7 @@ def test_mic_error_disarms_and_recovery_republishes():
 def test_step_exceptions_do_not_kill_worker():
     r = Rig()
     r.det.score = lambda f: 1 / 0
-    r.live._frames.put(FRAME)
+    r.live._frames.put((r.now, FRAME))
     r.live._stop.clear()
     try:
         r.live.step(FRAME)
@@ -312,7 +312,7 @@ def test_step_exceptions_do_not_kill_worker():
     import threading
     r.live._thread = threading.Thread(target=r.live._run, daemon=True)
     r.live._thread.start()
-    r.live._frames.put(FRAME)
+    r.live._frames.put((r.now, FRAME))
     threading.Event().wait(0.1)
     assert r.live._thread.is_alive()
     r.live._stop.set()
@@ -324,4 +324,30 @@ def test_queue_drops_oldest():
     for i in range(40):
         r.live._on_frame(np.full(FRAME_SAMPLES, i, dtype=np.int16))
     assert r.live._frames.qsize() == 25
-    assert r.live._frames.get_nowait()[0] == 15
+    assert r.live._frames.get_nowait()[1][0] == 15
+
+
+def test_followup_ignores_frames_queued_before_it_opened():
+    """Frames captured during the wake model's slow reset predate the follow-up: they
+    hold the tail of BMO's own reply and must not end the turn at once."""
+    r = Rig()
+    r.ctl.publish(done())
+    r.step(5)
+    assert ("start", "followup") in r.calls()
+    stale = r.now - 1.0
+    r.vad.speech = True
+    r.live.step(FRAME, at=stale)
+    r.vad.speech = False
+    for _ in range(12):
+        r.live.step(FRAME, at=stale)
+    assert ("finish",) not in r.calls()
+
+
+def test_followup_blip_does_not_end_it():
+    r = Rig()
+    r.cfg.listen.followup_seconds = 2.0
+    r.ctl.publish(done())
+    r.step(5)
+    r.step(1, speech=True)          # one 80 ms click
+    r.step(14, speech=False)
+    assert ("finish",) not in r.calls()
