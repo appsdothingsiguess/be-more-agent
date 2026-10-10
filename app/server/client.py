@@ -7,11 +7,12 @@ import binascii
 import json
 import logging
 import os
+import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import quote
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -38,31 +39,58 @@ def clean_emotion(value) -> str:
 
 @dataclass(frozen=True)
 class Action:
-    """Something BMO chose to do with its reply: an expression animation or a sound."""
-    type: str                       # "expression" or "sound"
+    """Something BMO chose to do with its reply: an animation, a face, a sound or music."""
+    type: str                       # "expression", "face", "sound" or "music"
     name: str
-    audio_wav: bytes | None = None  # sounds only
+    audio_wav: bytes | None = None  # sounds; music only when the reply has no audio
+
+
+ACTION_TYPES = ("expression", "face", "sound", "music")
+
+
+def _wav(a: dict) -> bytes:
+    try:
+        return base64.b64decode(a.get("audio_wav_base64") or "", validate=True)
+    except (binascii.Error, ValueError, TypeError):
+        return b""
+
+
+def clean_action(a) -> Action | None:
+    """One server action, or None if it is odd (unknown type, no name, sound without audio)."""
+    if not isinstance(a, dict) or not isinstance(a.get("name"), str) or not a["name"]:
+        return None
+    kind = a.get("type")
+    if kind in ("expression", "face"):
+        return Action(kind, a["name"])
+    if kind == "sound":
+        wav = _wav(a)
+        if wav:
+            return Action("sound", a["name"], wav)
+        if a.get("audio_wav_base64"):   # a streamed result repeats sounds without audio
+            log.warning("Dropping sound action %r with invalid audio", a["name"])
+    elif kind == "music":
+        return Action("music", a["name"], _wav(a) or None)
+    return None
 
 
 def clean_actions(value) -> tuple:
-    """The server's actions, in order. Odd entries (unknown type, no name, bad audio) are
-    dropped one by one so a single bad action never fails the turn."""
-    out = []
-    for a in value if isinstance(value, list) else ():
-        if not isinstance(a, dict) or not isinstance(a.get("name"), str) or not a["name"]:
-            continue
-        if a.get("type") == "expression":
-            out.append(Action("expression", a["name"]))
-        elif a.get("type") == "sound":
-            try:
-                wav = base64.b64decode(a.get("audio_wav_base64") or "", validate=True)
-            except (binascii.Error, ValueError, TypeError):
-                wav = b""
-            if wav:
-                out.append(Action("sound", a["name"], wav))
-            else:
-                log.warning("Dropping sound action %r without valid audio", a["name"])
-    return tuple(out)
+    """The server's actions, in order. Odd entries are dropped one by one so a single bad
+    action never fails the turn."""
+    out = (clean_action(a) for a in (value if isinstance(value, list) else ()))
+    return tuple(a for a in out if a is not None)
+
+
+def clean_song(value) -> str | None:
+    """The mood of a sung song ({"mood": "silly"} or "silly"), or None."""
+    if isinstance(value, dict):
+        value = value.get("mood") or "happy"
+    return value if isinstance(value, str) and value else None
+
+
+def clean_memory_changes(value) -> tuple:
+    return tuple({"op": c["op"], "name": str(c.get("name") or "")}
+                 for c in (value if isinstance(value, list) else ())
+                 if isinstance(c, dict) and c.get("op") in ("create", "update", "delete"))
 
 
 def clean_statuses(value) -> tuple:
@@ -87,6 +115,8 @@ class InteractResult:
     emotion: str = "neutral"   # one of EMOTIONS; anything else becomes neutral
     actions: tuple = ()        # Action, in the order BMO did them
     statuses: tuple = ()       # str
+    song: str | None = None    # mood when BMO sang (the song is in audio_wav)
+    memory_changes: tuple = ()  # {"op": create|update|delete, "name"}
 
 
 class BMOClient:
@@ -155,6 +185,12 @@ class BMOClient:
             return None
         if isinstance(body, dict) and body.get("status") == "unavailable" and body.get("code"):
             return str(body["code"]), str(body.get("display_message") or "")
+        # /v1/bmo/interact: 503 {"detail": "large_model_session_active"} or {"detail": {code}}
+        detail = body.get("detail") if isinstance(body, dict) else None
+        if r.status_code == 503 and isinstance(detail, dict) and detail.get("code"):
+            return str(detail["code"]), str(detail.get("display_message") or "")
+        if r.status_code == 503 and isinstance(detail, str) and re.fullmatch(r"[a-z_]+", detail):
+            return detail, ""
         return None
 
     def _request(
@@ -239,7 +275,11 @@ class BMOClient:
         request_id: str | None = None,
         history: list[dict] | None = None,
         memory: bool | None = None,
+        on_event: Callable[[dict], None] | None = None,
     ) -> InteractResult:
+        """One BMO turn. With on_event the reply is streamed: on_event gets each event as it
+        happens (transcript, status, song, and actions as {"type": "action", "action": Action})
+        and the final result is returned as usual. Exceptions from on_event abort the turn."""
         if not text and not audio_path:
             raise ValueError("interact requires text or audio_path")
         rid = request_id or self.new_request_id()
@@ -251,6 +291,8 @@ class BMOClient:
             files["history"] = (None, json.dumps(history))
         if memory is not None:
             files["memory"] = (None, "on" if memory else "off")
+        if on_event is not None:
+            files["stream"] = (None, "true")
         handles = []
         try:
             if audio_path:
@@ -262,21 +304,79 @@ class BMOClient:
                 handles.append(f)
                 files["image"] = (os.path.basename(image_path), f, "image/jpeg")
             r = self._request("POST", "/v1/bmo/interact", request_id=rid,
-                              files=files)
+                              files=files, stream=on_event is not None)
         finally:
             for f in handles:
                 f.close()
-        body = self._json(r)
+        if on_event is not None and "event-stream" in r.headers.get("content-type", ""):
+            try:
+                return self._read_stream(r, rid, on_event)
+            finally:
+                r.close()
+        body = self._json(r)       # also an older server that ignores stream=true
         if not isinstance(body, dict):
             raise BadResponse("malformed interact response", status=r.status_code)
+        return self._result(body, rid, r.status_code)
+
+    def _read_stream(self, r: requests.Response, rid: str,
+                     on_event: Callable[[dict], None]) -> InteractResult:
+        streamed: list[Action] = []
+        try:
+            for line in r.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                try:
+                    ev = json.loads(line[5:].strip())
+                except ValueError:
+                    log.warning("Skipping bad stream line")
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                kind = ev.get("type")
+                if kind == "result":
+                    result = self._result(ev, rid, r.status_code)
+                    if streamed:   # the result repeats sounds without their audio
+                        result = replace(result, actions=tuple(streamed))
+                    return result
+                if kind == "error":
+                    self._raise_stream_error(ev)
+                if kind in ACTION_TYPES:
+                    action = clean_action(ev)
+                    if action is not None:
+                        streamed.append(action)
+                        on_event({"type": "action", "action": action})
+                elif kind in ("transcript", "status", "song"):
+                    on_event(ev)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise ServerUnavailable(f"{type(e).__name__} reading reply stream") from e
+        raise BadResponse("reply stream ended without a result", status=r.status_code)
+
+    @staticmethod
+    def _raise_stream_error(ev: dict) -> None:
+        try:
+            status = int(ev.get("status") or 500)
+        except (TypeError, ValueError):
+            status = 500
+        code, detail = str(ev.get("code") or ""), str(ev.get("detail") or "")
+        if code and status == 503:
+            raise ServerBusy(code, detail, status=status)
+        if "cancel" in code or status == 499:
+            raise RequestCancelled(f"request cancelled ({status})")
+        if status >= 500:
+            raise ServerUnavailable(f"server error {status}")
+        raise BadResponse(f"stream error {status}", status=status, detail=detail)
+
+    @staticmethod
+    def _result(body: dict, rid: str, status: int) -> InteractResult:
         raw = dict(body)
+        raw.pop("type", None)
         b64 = raw.pop("audio_wav_base64", None)
         audio = None
         if b64:
             try:
                 audio = base64.b64decode(b64, validate=True)
             except (binascii.Error, ValueError, TypeError) as e:
-                raise BadResponse("invalid base64 audio", status=r.status_code) from e
+                raise BadResponse("invalid base64 audio", status=status) from e
         actions = clean_actions(raw.get("actions"))
         if isinstance(raw.get("actions"), list):   # keep raw small: no sound blobs
             raw["actions"] = [{k: v for k, v in a.items() if k != "audio_wav_base64"}
@@ -291,6 +391,8 @@ class BMOClient:
             emotion=clean_emotion(raw.get("emotion")),
             actions=actions,
             statuses=clean_statuses(raw.get("statuses")),
+            song=clean_song(raw.get("song")),
+            memory_changes=clean_memory_changes(raw.get("memory_changes")),
         )
 
     # -- long-term memory (404 = server has no memory routes) --------------
@@ -321,6 +423,16 @@ class BMOClient:
         None = no memory routes or no such memory (both 404)."""
         r = self._short("DELETE", f"/v1/bmo/memories/{quote(str(key), safe='')}", ok=(404,))
         return None if r.status_code == 404 else True
+
+    def put_memory(self, name: str, type: str, content: str) -> dict | None:
+        """Create or edit one topic. None = memory is off (404); a broken rule raises
+        BadResponse with status 422 and the server's explanation in detail."""
+        r = self._short("PUT", f"/v1/bmo/memories/{quote(name, safe='')}", ok=(404,),
+                        json={"type": type, "content": content})
+        if r.status_code == 404:
+            return None
+        body = self._json(r)
+        return body if isinstance(body, dict) else {}
 
     def end_session(self, session_id: str) -> bool | None:
         """End a conversation so the server consolidates its logged turns into long-term

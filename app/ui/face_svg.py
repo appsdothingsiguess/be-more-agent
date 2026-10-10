@@ -384,3 +384,31 @@ def draw_ops(face: Face, scale_x: float, scale_y: float, offsets: dict | None = 
                 ops.append(("line", line, _hex(s.stroke, face.bg, s.stroke[3]),
                             s.width * scale_x))
     return ops
+
+
+# ---------------------------------------------------------------- generated eyes
+
+def _generated(points: list, fill: RGBA) -> Shape:
+    return Shape(_canonical(_resample(points, True), True), True, fill, fill[:3] + (0.0,), 0.0)
+
+
+def heart_shape(cx: float, cy: float, size: float, fill: RGBA = (226, 44, 84, 1.0)) -> Shape:
+    """A heart about 2*size wide, centred on (cx, cy): for heart eyes."""
+    k = size / 16.0
+    pts = []
+    for i in range(180):
+        t = 2 * math.pi * i / 180
+        pts.append((cx + k * 16 * math.sin(t) ** 3,
+                    cy - k * (13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t)
+                              - math.cos(4 * t)) - k * 2))
+    return _generated(pts, fill)
+
+
+def star_shape(cx: float, cy: float, size: float, fill: RGBA = (0, 0, 0, 1.0)) -> Shape:
+    """A four-point sparkle about 2*size across, centred on (cx, cy): for sparkle eyes."""
+    pts = []
+    for i in range(8):
+        a = math.pi / 2 * (i // 2) + (math.pi / 4 if i % 2 else 0.0) - math.pi / 2
+        r = size if i % 2 == 0 else size * 0.3
+        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    return _generated(pts, fill)

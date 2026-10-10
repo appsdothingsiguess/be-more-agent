@@ -42,6 +42,8 @@ class FakeClient:
         self.error = None
         self.raw = {}
         self.actions = ()
+        self.stream = []          # events fed to on_event before the result
+        self.extra = {}           # more result attributes (song, memory_changes, ...)
         self.consolidated = []
         self.consolidate_result = True
         self.session_id = None
@@ -64,9 +66,15 @@ class FakeClient:
             self.block.wait(5)
         if self.error:
             raise self.error
-        return SimpleNamespace(transcript="hi bmo", text=f"reply to {kw['request_id']}",
-                               audio_wav=WAV, request_id=kw["request_id"],
-                               raw=self.raw, actions=self.actions)
+        streamed = []
+        for ev in self.stream:
+            kw["on_event"](ev)
+            if ev["type"] == "action":
+                streamed.append(ev["action"])
+        return SimpleNamespace(**{"transcript": "hi bmo", "text": f"reply to {kw['request_id']}",
+                                  "audio_wav": WAV, "request_id": kw["request_id"],
+                                  "raw": self.raw, "actions": tuple(streamed) or self.actions,
+                                  **self.extra})
 
     def forget_memories(self):
         self.log.append(("forget_memories",))
@@ -1139,3 +1147,108 @@ def test_action_sounds_muted_in_text_only(rig):
     rig.client.actions = (Action("sound", "coin", b"COIN"),)
     run_text(rig)
     assert rig.spk.played == []
+
+
+
+def _act(kind, name, audio=None):
+    from app.server.client import Action
+    return {"type": "action", "action": Action(kind, name, audio)}
+
+
+def test_stream_status_shows_while_thinking(rig):
+    events, calls = [], []
+    rig.ctl.subscribe(events.append)
+    rig.ui.set_caption = lambda text: calls.append(("caption", text))
+    rig.ui.play_expression = lambda name: calls.append(("expression", name)) or 0.0
+    rig.client.stream = [{"type": "status", "status": "searching_memories",
+                          "text": "Searching memories...", "expression": "look_around"}]
+    run_text(rig)
+    assert calls == [("caption", "Searching memories..."), ("expression", "look_around")]
+    status = [e for e in events if e["type"] == "status"]
+    assert status and status[0]["text"] == "Searching memories..." and status[0]["turn"]
+    assert any(e["type"] == "phase" and e["message"] == "Searching memories..." for e in events)
+
+
+def test_streamed_actions_play_once_in_order_then_emotion_then_reply(rig):
+    rig.ui.play_expression = lambda name: rig.log.append(("expression", name)) or 0.05
+    rig.ui.show_face = lambda name: rig.log.append(("face", name)) or 0.05
+    rig.ui.set_emotion = lambda name: rig.log.append(("emotion", name))
+    rig.client.extra = {"emotion": "happy"}
+    rig.client.stream = [_act("expression", "wink"), _act("face", "surprised"),
+                         _act("sound", "coin", b"COIN"), _act("expression", "heart_eyes")]
+    run_text(rig)
+    seq = [e for e in rig.log if e[0] in ("expression", "face", "emotion", "play")]
+    assert seq[:5] == [("expression", "wink"), ("face", "surprised"), ("play", "sfx-2.wav"),
+                       ("expression", "heart_eyes"), ("emotion", "happy")]
+    assert seq[5][0] == "play" and len(seq) == 6        # the reply, and nothing replayed
+
+
+def test_expression_waits_for_its_animation(rig):
+    rig.ui.play_expression = lambda name: 0.3
+    rig.client.stream = [_act("expression", "dance")]
+    t0 = time.monotonic()
+    run_text(rig)
+    assert time.monotonic() - t0 >= 0.3
+
+
+def test_interrupt_during_streamed_action_drops_the_reply(rig):
+    started = threading.Event()
+
+    def long_dance(name):
+        started.set()
+        return 5.0
+    rig.ui.play_expression = long_dance
+    rig.client.stream = [_act("expression", "dance"), _act("expression", "wink")]
+    done = []
+    rig.ctl.subscribe(lambda e: e["type"] == "turn_done" and done.append(e))
+    rig.ctl.submit_text("show me")
+    assert started.wait(5)
+    rig.ctl.interrupt()
+    assert rig.ctl.wait_idle(5)
+    time.sleep(0.2)
+    assert done and done[0]["ok"] is False
+    assert rig.spk.played == []
+
+
+def test_song_and_music_overlays(rig):
+    calls = []
+    rig.ui.set_overlay = lambda kind, lyrics=(): calls.append((kind, list(lyrics)))
+    rig.client.stream = [{"type": "song", "mood": "silly"}]
+    run_text(rig)
+    assert calls == [("song", ["reply to req-1"])]
+    rig.client.stream = [_act("music", "dance_party")]
+    run_text(rig)
+    assert calls[-1] == ("music", [])
+    rig.client.stream = []
+    run_text(rig)
+    assert len(calls) == 2
+
+
+def test_streamed_transcript_shown_once(rig):
+    rig.client.stream = [{"type": "transcript", "text": "hi bmo"}]
+    run_text(rig)
+    assert rig.ui.texts.count(("user", "hi bmo")) == 1
+
+
+def test_memory_changes_emit_a_memory_event(rig):
+    events = []
+    rig.ctl.subscribe(events.append)
+    rig.client.extra = {"memory_changes": ({"op": "create", "name": "dog-finn"},
+                                           {"op": "delete", "name": "old"})}
+    run_text(rig)
+    mem = [e for e in events if e["type"] == "memory"]
+    assert mem and mem[0]["changes"] == [{"op": "create", "name": "dog-finn"}]
+
+
+def test_save_memory(rig):
+    from app.server.errors import BadResponse
+    rig.client.put_memory = lambda n, t, c: {"name": n, "type": t, "content": c}
+    assert rig.ctl.save_memory("dog", "pet", "Finn.")["saved"] is True
+
+    def bad(n, t, c):
+        raise BadResponse("unexpected status 422", status=422, detail="too long")
+    rig.client.put_memory = bad
+    assert rig.ctl.save_memory("dog", "pet", "x") == {"available": True, "saved": False,
+                                                      "error": "too long"}
+    rig.client.put_memory = lambda n, t, c: None
+    assert rig.ctl.save_memory("dog", "pet", "x")["available"] is False

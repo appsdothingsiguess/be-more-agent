@@ -20,6 +20,9 @@ Event feed (dicts passed to subscribers, each also carries "time"). Schema:
                goodbye = the user said farewell: no follow-up, session ends
   live       {armed, model, error, ...}           published by others via publish(); sticky
   setting    {key, value}                         after a live setting is applied
+  status     {turn, status, text}                 BMO is working on something during a turn
+               ("Searching memories..."); also sets the phase message
+  memory     {turn, changes: [{op, name}]}        the server saved or forgot long-term memory
   session    {id, reason, consolidated}           a conversation session ended and a fresh one
                started (id = the NEW session). reason: new_session|idle|startup.
                consolidated: ok (saved to long-term memory) | pending (server unreachable,
@@ -79,6 +82,15 @@ class Turn:
     play_on_pi: bool
     done: bool = False
     goodbye: bool = False
+    played: int = 0                 # server actions already played (streamed as they came)
+    song: str | None = None         # mood, when BMO sings this reply
+    music: bool = False             # a music track follows the speech in the reply audio
+    music_audio: bytes | None = None   # the track itself, when the reply has no audio
+    heard: str | None = None        # transcript already shown from the stream
+
+
+class _Stale(Exception):
+    """The turn was interrupted while its reply was still streaming."""
 
 
 class InteractionController:
@@ -608,6 +620,20 @@ class InteractionController:
             return {"available": False, "deleted": False}
         return {"available": True, "deleted": bool(ok)}
 
+    def save_memory(self, name: str, type: str, content: str) -> dict:
+        """Create or edit one long-term memory topic on the server."""
+        try:
+            topic = self.client.put_memory(name, type, content)
+        except BadResponse as e:
+            return {"available": True, "saved": False,
+                    "error": e.detail if e.status == 422 and e.detail else "Could not save"}
+        except Exception as e:
+            log.warning("Saving memory %s failed: %s", name, e)
+            return {"available": True, "saved": False, "error": "Could not reach the server"}
+        if topic is None:
+            return {"available": False, "saved": False, "error": None}
+        return {"available": True, "saved": True, "error": None, "memory": topic}
+
     def conversation(self) -> list[dict]:
         return self.memory.messages()
 
@@ -759,21 +785,77 @@ class InteractionController:
             threading.Thread(target=self.end_session, args=("goodbye",),
                              name="bmo-session", daemon=True).start()
 
-    def _run_actions(self, actions, turn: Turn, gen: int) -> bool:
-        """Do BMO's actions in order, before the spoken reply: expressions start an
-        animation (it keeps going while later sounds and the speech play), sounds play
-        to the end on the Pi speaker. False if the turn was interrupted meanwhile."""
-        sfx_dir = self.cfg.runtime_path / "sfx"
-        for i, action in enumerate(actions):
-            if action.type == "expression":
-                play = getattr(self.ui, "play_expression", None)
-                if play is not None:
-                    play(action.name)
-            elif action.type == "sound" and turn.play_on_pi and not self.cfg.ui.text_only:
-                self.speaker.play_bytes(action.audio_wav, sfx_dir / f"sfx-{i}.wav", block=True)
+    def _wait(self, seconds, gen: int) -> bool:
+        """Sleep while an animation plays; False as soon as the turn is interrupted."""
+        end = time.monotonic() + (seconds if isinstance(seconds, (int, float)) else 0.0)
+        while (left := end - time.monotonic()) > 0:
             if self._stale(gen):
                 return False
+            time.sleep(min(0.05, left))
+        return not self._stale(gen)
+
+    def _play_action(self, action, turn: Turn, gen: int) -> bool:
+        """One of BMO's actions, played to its end: an expression animation, a short face,
+        a sound on the Pi speaker; music is only noted (its track is in the reply audio).
+        False if the turn was interrupted meanwhile."""
+        index, turn.played = turn.played, turn.played + 1
+        if action.type in ("expression", "face"):
+            ui_fn = getattr(self.ui, "play_expression" if action.type == "expression"
+                            else "show_face", None)
+            return self._wait(ui_fn(action.name) if ui_fn is not None else 0.0, gen)
+        if action.type == "sound" and turn.play_on_pi and not self.cfg.ui.text_only:
+            self.speaker.play_bytes(action.audio_wav,
+                                    self.cfg.runtime_path / "sfx" / f"sfx-{index}.wav",
+                                    block=True)
+        elif action.type == "music":
+            turn.music = True
+            turn.music_audio = action.audio_wav or turn.music_audio
+        return not self._stale(gen)
+
+    def _run_actions(self, actions, turn: Turn, gen: int) -> bool:
+        """Play the actions not yet played from the stream, in order, before the spoken
+        reply. False if the turn was interrupted meanwhile."""
+        for action in actions[turn.played:]:
+            if not self._play_action(action, turn, gen):
+                return False
         return True
+
+    def _stream_handler(self, turn: Turn, gen: int) -> Callable[[dict], None]:
+        """on_event for a streamed reply: runs on the turn thread while the reply arrives."""
+        def on_event(ev: dict) -> None:
+            if self._stale(gen):
+                raise _Stale()
+            kind = ev.get("type")
+            if kind == "transcript" and isinstance(ev.get("text"), str) and ev["text"].strip():
+                turn.heard = ev["text"].strip()
+                self._show(turn.heard, "user")
+            elif kind == "status":
+                text = str(ev.get("text") or "Thinking...")
+                self._set_state(BotState.THINKING, text, gen)
+                caption = getattr(self.ui, "set_caption", None)
+                if caption is not None:
+                    caption(text)
+                play = getattr(self.ui, "play_expression", None)
+                if play is not None:
+                    play(str(ev.get("expression") or "look_around"))
+                self._emit({"type": "status", "turn": turn.id, "status": ev.get("status"),
+                            "text": text})
+            elif kind == "song":
+                turn.song = str(ev.get("mood") or "happy")
+            elif kind == "action":
+                if not self._play_action(ev["action"], turn, gen):
+                    raise _Stale()
+        return on_event
+
+    def _overlay(self, song: str | None, music: bool, text: str) -> None:
+        """Singing screen (notes + lyrics) or music screen while the reply plays."""
+        set_overlay = getattr(self.ui, "set_overlay", None)
+        if set_overlay is None:
+            return
+        if song:
+            set_overlay("song", text.splitlines())
+        elif music:
+            set_overlay("music")
 
     @staticmethod
     def _wav_duration(data: bytes) -> float | None:
@@ -843,7 +925,8 @@ class InteractionController:
                 extra = ({"history": self.memory.messages(), "memory": True}
                          if use_memory else {"memory": False})
                 result = self.client.interact(text=text, audio_path=audio, image_path=image,
-                                              speak=speak, request_id=request_id, **extra)
+                                              speak=speak, request_id=request_id,
+                                              on_event=self._stream_handler(turn, gen), **extra)
             finally:
                 with self._lock:
                     if self._active_request_id == request_id:
@@ -861,19 +944,24 @@ class InteractionController:
 
             self.last_transcript = result.transcript or text
             self.last_reply = result.text
-            if self.last_transcript:
+            if self.last_transcript and self.last_transcript != turn.heard:
                 self._show(self.last_transcript, "user")
             self._show(result.text, "bmo")
             if end_session:
                 threading.Thread(target=self.end_session, args=("new_session",),
                                  name="bmo-session", daemon=True).start()
-            set_emotion = getattr(self.ui, "set_emotion", None)
-            if set_emotion is not None:
-                set_emotion(result.emotion)     # the face keeps it while BMO talks
+            saved = [c for c in getattr(result, "memory_changes", ())
+                     if c.get("op") in ("create", "update")]
+            if saved:
+                self._emit({"type": "memory", "turn": turn.id, "changes": saved})
             for status in getattr(result, "statuses", ()):
                 log.info("BMO status: %s", status)
             if not self._run_actions(getattr(result, "actions", ()), turn, gen):
                 return
+            set_emotion = getattr(self.ui, "set_emotion", None)
+            if set_emotion is not None:
+                set_emotion(result.emotion)     # after a face show, back to the reply's face
+            song = getattr(result, "song", None) or turn.song
 
             reply = None
             if result.audio_wav:
@@ -885,11 +973,22 @@ class InteractionController:
                 prepare = getattr(self.ui, "prepare_speech", None)
                 if prepare is not None:
                     prepare(reply)          # lets the face follow the reply's loudness
+                self._overlay(song, turn.music, result.text)
                 if not self._set_state(BotState.SPEAKING, "", gen):
                     return
                 spoke = True
                 self.speaker.play(reply, block=True)
+            elif turn.music_audio and turn.play_on_pi and not self.cfg.ui.text_only:
+                # No reply audio, but the music action carries its track: play that.
+                self._overlay(None, True, "")
+                if not self._set_state(BotState.SPEAKING, "", gen):
+                    return
+                spoke = True
+                self.speaker.play_bytes(turn.music_audio,
+                                        self.cfg.runtime_path / "sfx" / "music.wav", block=True)
             ok = self._set_state(BotState.IDLE, "", gen)
+        except _Stale:
+            log.info("Turn interrupted while its reply streamed")
         except RequestCancelled:
             log.info("Request cancelled")
             self.notify("cancelled", gen=gen)

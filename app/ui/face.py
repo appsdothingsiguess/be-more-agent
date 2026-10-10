@@ -8,6 +8,7 @@ import array
 import math
 import random
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.ui import face_svg
@@ -82,10 +83,42 @@ MOUTH_VARIANTS = {
 # Not emotions: driven by state, by blinking, or by speech.
 NOT_EMOTIONS = ("blink", "error", "listening")
 
-# Server "expression" actions that are motions rather than faces, with their length in seconds.
-MOVES = {"dance": 2.6, "wink": 0.7, "jump": 0.8, "nod": 1.0, "shake": 1.0}
-MOVE_ALIASES = {"spin": "dance", "wiggle": "dance", "boogie": "dance", "bounce": "jump",
-                "hop": "jump", "shake_head": "shake"}
+@dataclass(frozen=True)
+class Move:
+    """A server "expression" action: a short animation played once."""
+    seconds: float
+    face: str | None = None     # expression shown while it runs (else the current one)
+    mouth: str | None = None    # mouth shape held while it runs
+    eyes: str | None = None     # blink | wink | heart | star
+    motion: str | None = None   # whole-face or eye movement, see _move_offset
+
+
+MOVES = {
+    "blink": Move(0.4, eyes="blink"),
+    "wink": Move(0.7, eyes="wink"),
+    "laugh": Move(1.2, face="happy", mouth="mouth_wide", motion="laugh"),
+    "look_around": Move(1.5, motion="look"),
+    "nod": Move(1.0, motion="nod"),
+    "shake_head": Move(1.0, motion="shake"),
+    "bounce": Move(0.8, motion="hop"),
+    "wiggle": Move(1.2, motion="wiggle"),
+    "sparkle_eyes": Move(1.5, face="excited", eyes="star"),
+    "heart_eyes": Move(1.5, face="happy", eyes="heart"),
+    "yawn": Move(1.5, face="sleepy", mouth="mouth_tall"),
+    "dance": Move(2.0, motion="dance"),
+}
+MOVE_ALIASES = {"spin": "dance", "boogie": "dance", "jump": "bounce", "hop": "bounce",
+                "shake": "shake_head", "look": "look_around", "sparkle": "sparkle_eyes",
+                "hearts": "heart_eyes"}
+FACE_ACTION_S = 1.0         # a "face" action holds its emotion this long
+OVERLAYS = ("song", "music")
+LYRIC_FALLBACK_S = 3.0      # seconds per lyric line when the reply length is unknown
+
+
+def move_for(name) -> tuple[str, Move] | None:
+    key = name.strip().lower() if isinstance(name, str) else ""
+    key = MOVE_ALIASES.get(key, key)
+    return (key, MOVES[key]) if key in MOVES else None
 
 
 def emotion_names(faces: dict) -> list:
@@ -128,6 +161,11 @@ class FaceAnimator:
         self._next_drift = 1.0
         self._move: str | None = None
         self._move_start = self._move_end = 0.0
+        self.overlay: str | None = None     # song | music: notes (and lyrics) over the face
+        self.lyrics: list = []
+        self.caption = ""                   # status text while BMO works
+        self._shown: str | None = None      # face action, any state
+        self._shown_until = 0.0
         self._last = None
         self._target_key = None
         self._first = True
@@ -154,6 +192,10 @@ class FaceAnimator:
             self.speech_start = None
         if state not in EMOTION_STATES:
             self.emotion = None
+        if state != BotState.THINKING:
+            self.caption = ""
+        if state in (BotState.IDLE, BotState.ERROR, BotState.LISTENING):
+            self.overlay, self.lyrics = None, []
 
     def set_emotion(self, name: str | None, now: float) -> None:
         if name is not None and name not in self.faces:
@@ -161,19 +203,56 @@ class FaceAnimator:
         self.emotion = name
         self.emotion_until = now + 60.0 if self.state == BotState.SPEAKING else now + EMOTION_HOLD_S
 
-    def play_expression(self, name: str, now: float) -> bool:
+    def play_expression(self, name: str, now: float) -> float:
         """A server 'expression' action: a move (dance, wink, ...) or a face name.
-        False if BMO has no such expression."""
-        key = name.strip().lower() if isinstance(name, str) else ""
-        key = MOVE_ALIASES.get(key, key)
-        if key in MOVES:
-            self._move, self._move_start, self._move_end = key, now, now + MOVES[key]
+        Returns how long it lasts in seconds; 0.0 if BMO has no such expression."""
+        found = move_for(name)
+        if found:
+            key, move = found
+            self._move, self._move_start, self._move_end = key, now, now + move.seconds
             self.dirty = True
-            return True
+            return move.seconds
+        key = name.strip().lower() if isinstance(name, str) else ""
         if key in self.faces and key in emotion_names(self.faces):
             self.set_emotion(key, now)
-            return True
-        return False
+            return FACE_ACTION_S
+        return 0.0
+
+    def show_face(self, name: str, now: float, seconds: float = FACE_ACTION_S) -> bool:
+        """A server 'face' action: hold an emotion briefly, as one step of a face show."""
+        key = name.strip().lower() if isinstance(name, str) else ""
+        if key not in self.faces or key not in emotion_names(self.faces):
+            return False
+        # Own slot, not self.emotion: it must show while THINKING too (streamed actions).
+        self._shown, self._shown_until = key, now + seconds
+        self.dirty = True
+        return True
+
+    def set_overlay(self, kind: str | None, lyrics=()) -> None:
+        """Music notes over the face: 'song' (with lyrics), 'music', or None to clear."""
+        self.overlay = kind if kind in OVERLAYS else None
+        self.lyrics = [ln.strip() for ln in lyrics if ln.strip()] if self.overlay == "song" else []
+        self.dirty = True
+
+    def set_caption(self, text: str) -> None:
+        self.caption = text or ""
+        self.dirty = True
+
+    def lyric(self, now: float) -> str:
+        """The lyric line for now: the lines spread evenly over the reply audio."""
+        if not self.lyrics or self.state != BotState.SPEAKING or self.speech_start is None:
+            return ""
+        n, elapsed = len(self.lyrics), max(0.0, now - self.speech_start)
+        total = len(self.envelope) * self.window
+        per = total / n if total > 0 else LYRIC_FALLBACK_S
+        return self.lyrics[min(n - 1, int(elapsed / per))]
+
+    def speech_level(self, now: float) -> float:
+        level = self._speech_level(now)
+        return 0.5 if level is None else level
+
+    def _active_move(self, now: float) -> Move | None:
+        return MOVES[self._move] if self._move is not None and now < self._move_end else None
 
     def _move_offset(self, now: float) -> tuple[float, float]:
         """Whole-face shift in SVG units for the running move; eases in and out."""
@@ -182,16 +261,29 @@ class FaceAnimator:
         dur = self._move_end - self._move_start
         t = now - self._move_start
         env = math.sin(math.pi * t / dur)
-        if self._move == "dance":
+        motion = MOVES[self._move].motion
+        if motion == "dance":
             return (38 * math.sin(2 * math.pi * 1.5 * t) * env,
                     -20 * abs(math.sin(2 * math.pi * 1.5 * t)) * env)
-        if self._move == "jump":
+        if motion == "hop":
             return (0.0, -70 * env)
-        if self._move == "nod":
+        if motion == "nod":
             return (0.0, 24 * math.sin(2 * math.pi * 2 * t / dur) * env)
-        if self._move == "shake":
+        if motion == "shake":
             return (28 * math.sin(2 * math.pi * 3 * t / dur) * env, 0.0)
+        if motion == "wiggle":
+            return (34 * math.sin(2 * math.pi * 2 * t / dur) * env, 0.0)
+        if motion == "laugh":
+            return (0.0, -14 * abs(math.sin(2 * math.pi * 3 * t / dur)) * env)
         return (0.0, 0.0)
+
+    def _look_offset(self, now: float) -> tuple[float, float]:
+        """Eyes only: glance left, then right, then back (look_around)."""
+        move = self._active_move(now)
+        if move is None or move.motion != "look":
+            return (0.0, 0.0)
+        t = (now - self._move_start) / (self._move_end - self._move_start)
+        return (-44 * math.sin(2 * math.pi * t), 0.0)
 
     def prepare_speech(self, envelope: list, window: float = ENV_WINDOW_S) -> None:
         """Hand over the reply's loudness just before set_state(SPEAKING)."""
@@ -202,6 +294,13 @@ class FaceAnimator:
     def _expression(self, now: float) -> str:
         if self.emotion and now > self.emotion_until and self.state != BotState.SPEAKING:
             self.emotion = None
+        move = self._active_move(now)
+        if move is not None and move.face in self.faces:
+            return move.face
+        if self._shown is not None:
+            if now < self._shown_until:
+                return self._shown
+            self._shown = None
         if self.state in EMOTION_STATES and self.emotion in self.faces:
             return self.emotion
         if self.state == BotState.IDLE and now - self.state_since > SLEEP_AFTER_S \
@@ -236,8 +335,8 @@ class FaceAnimator:
         return self._mouth
 
     def _retarget(self, expr: str, mouth: str | None, blinking: bool,
-                  wink: bool = False) -> None:
-        key = (expr, mouth, blinking, wink)
+                  wink: bool = False, eyes: str | None = None) -> None:
+        key = (expr, mouth, blinking, wink, eyes)
         if key == self._target_key:
             return
         self._target_key = key
@@ -253,6 +352,13 @@ class FaceAnimator:
                 tgt.parts[part] = [s.copy() for s in self.faces["blink"].parts[part]]
         if wink and "blink" in self.faces and "eye-right" in self.faces["blink"].parts:
             tgt.parts["eye-right"] = [s.copy() for s in self.faces["blink"].parts["eye-right"]]
+        if eyes in ("heart", "star"):
+            make = face_svg.heart_shape if eyes == "heart" else face_svg.star_shape
+            for part in ("eye-left", "eye-right"):
+                shapes = tgt.parts.get(part) or self.faces["neutral"].parts.get(part)
+                if shapes:
+                    cx, cy = shapes[0].centroid()
+                    tgt.parts[part] = [make(cx, cy, 52.0)]
         face_svg.pad_pair(self.current, tgt)
         self.target = tgt
         if self._first:
@@ -263,9 +369,15 @@ class FaceAnimator:
         """Advance to time now (monotonic seconds). True if the picture changed."""
         dt = 0.033 if self._last is None else max(0.0, min(0.25, now - self._last))
         expr = self._expression(now)
+        move = self._active_move(now)
+        eyes = move.eyes if move is not None else None
 
         blinking = False
-        if expr in BLINKABLE:
+        if eyes == "blink":
+            blinking = now - self._move_start < move.seconds / 2
+        elif eyes in ("heart", "star"):
+            pass                                # no blinking over generated eyes
+        elif expr in BLINKABLE:
             if now >= self._next_blink:
                 self._blink_until = now + 0.13
                 self._next_blink = now + self.rng.uniform(2.2, 6.0)
@@ -277,13 +389,16 @@ class FaceAnimator:
         if self.state == BotState.SPEAKING:
             self._mouth = self._pick_mouth(now)
             mouth = self._mouth
+        if move is not None and move.mouth in self.faces:
+            mouth = move.mouth
         moving = self._move is not None
         if moving and now >= self._move_end:
             self._move, moving = None, False
             self.dirty = True                   # one last frame back at rest
-        self._retarget(expr, mouth, blinking, wink=moving and self._move == "wink")
+        self._retarget(expr, mouth, blinking, wink=eyes == "wink",
+                       eyes=eyes if eyes in ("heart", "star") else None)
 
-        moved = self._update_drift(now, dt) or moving
+        moved = self._update_drift(now, dt) or moving or self.overlay is not None
         rate = RATE_FAST if blinking else RATE_TALK if mouth else RATE_CALM
         delta = face_svg.approach(self.current, self.target, 1 - math.exp(-rate * dt))
         self._last = now
@@ -313,6 +428,8 @@ class FaceAnimator:
         mx, my = self._move_offset(now) if now is not None else (0.0, 0.0)
         out = {name: (mx, my) for name in self.current.parts}
         dx, dy = self._drift
+        lx, ly = self._look_offset(now) if now is not None else (0.0, 0.0)
+        dx, dy = dx + lx, dy + ly
         for name in ("eye-left", "eye-right", "brow-left", "brow-right"):
             out[name] = (dx + mx, dy + my)
         return out

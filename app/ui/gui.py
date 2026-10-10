@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import random
 import time
@@ -73,6 +74,7 @@ class TkUI:
         self._press_job = None
         self.animator = self._load_animator(svg_dir)
         self._face_items: list = []
+        self._overlay_items: dict = {}
         self.canvas = self.background_label = None
         if self.animator is not None:
             self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0, bd=0)
@@ -152,6 +154,54 @@ class TkUI:
                 items.append((kind, item))
         for kind, item in items[len(ops):]:
             canvas.itemconfigure(item, state="hidden")
+        self._draw_overlay(time.monotonic())
+
+    def _draw_overlay(self, now: float) -> None:
+        """Notes, lyrics, equalizer and status caption, drawn above the face."""
+        a, canvas = self.animator, self.canvas
+        sx, sy = self.w / 800, self.h / 480
+        if not self._overlay_items:
+            font = ("DejaVu Sans", max(18, int(40 * sy)), "bold")
+            self._overlay_items = {
+                "notes": [canvas.create_text(0, 0, text=t, font=font, fill="#1d3b2a",
+                                             state="hidden") for t in ("\u266a", "\u266b", "\u266a")],
+                "bars": [canvas.create_rectangle(0, 0, 0, 0, fill="#1d3b2a", outline="",
+                                                 state="hidden") for _ in range(9)],
+                "lyric": canvas.create_text(0, 0, font=("DejaVu Sans", max(14, int(26 * sy)), "bold"),
+                                            fill="#1d3b2a", width=int(self.w * 0.9),
+                                            justify="center", state="hidden"),
+                "caption": canvas.create_text(0, 0, font=("DejaVu Sans", max(12, int(24 * sy))),
+                                              fill="#1d3b2a", state="hidden"),
+            }
+        o = self._overlay_items
+        on = a.overlay is not None
+        for i, item in enumerate(o["notes"]):
+            if not on:
+                canvas.itemconfigure(item, state="hidden")
+                continue
+            x = (110 + 290 * i) * sx
+            y = (90 + 22 * math.sin(now * 3.2 + i * 2.1)) * sy
+            canvas.coords(item, x, y)
+            canvas.itemconfigure(item, state="normal")
+        music = a.overlay == "music"
+        level = a.speech_level(now) if music else 0.0
+        for i, item in enumerate(o["bars"]):
+            if not music:
+                canvas.itemconfigure(item, state="hidden")
+                continue
+            h = (10 + 70 * level * (0.55 + 0.45 * abs(math.sin(now * 7 + i * 1.3)))) * sy
+            x0 = (220 + i * 42) * sx
+            canvas.coords(item, x0, self.h - 12 * sy - h, x0 + 30 * sx, self.h - 12 * sy)
+            canvas.itemconfigure(item, state="normal")
+        lyric = a.lyric(now) if a.overlay == "song" else ""
+        canvas.coords(o["lyric"], self.w / 2, self.h - 40 * sy)
+        canvas.itemconfigure(o["lyric"], text=lyric, state="normal" if lyric else "hidden")
+        canvas.coords(o["caption"], self.w / 2, 34 * sy)
+        canvas.itemconfigure(o["caption"], text=a.caption,
+                             state="normal" if a.caption else "hidden")
+        for group in o.values():
+            for item in group if isinstance(group, list) else (group,):
+                canvas.tag_raise(item)
 
     def _load_animations(self, faces_dir: Path) -> dict:
         anims = {}
@@ -251,13 +301,46 @@ class TkUI:
         if self.animator is not None:
             self._post(lambda: self.animator.set_emotion(name, time.monotonic()))
 
-    def play_expression(self, name: str) -> None:
-        """Run a server expression action (dance, wink, or a face name) on the SVG face."""
-        def _update():
-            if not self.animator.play_expression(name, time.monotonic()):
-                log.info("No expression %r on this face set", name)
+    def play_expression(self, name: str) -> float:
+        """Run a server expression action (dance, wink, or a face name) on the SVG face.
+        Returns its length in seconds (0.0 if this face set can't show it)."""
+        if self.animator is None:
+            return 0.0
+        from app.ui.face import FACE_ACTION_S, emotion_names, move_for
+        found = move_for(name)
+        if found:
+            seconds = found[1].seconds
+        elif name in emotion_names(self.animator.faces):
+            seconds = FACE_ACTION_S
+        else:
+            log.info("No expression %r on this face set", name)
+            return 0.0
+        self._post(lambda: self.animator.play_expression(name, time.monotonic()))
+        return seconds
+
+    def show_face(self, name: str) -> float:
+        """A server face action: hold that emotion for about a second. Returns the seconds."""
+        if self.animator is None:
+            return 0.0
+        from app.ui.face import FACE_ACTION_S, emotion_names
+        if name not in emotion_names(self.animator.faces):
+            return 0.0
+        self._post(lambda: self.animator.show_face(name, time.monotonic()))
+        return FACE_ACTION_S
+
+    def set_overlay(self, kind: str | None, lyrics=()) -> None:
+        """Music notes over the face while BMO sings ('song', with lyrics) or plays 'music'."""
         if self.animator is not None:
-            self._post(_update)
+            lines = list(lyrics)
+            self._post(lambda: self.animator.set_overlay(kind, lines))
+
+    def set_caption(self, text: str) -> None:
+        """Status text over the face while BMO works ("Searching memories...")."""
+        def _update():
+            self.status_var.set(text)
+            if self.animator is not None:
+                self.animator.set_caption(text)
+        self._post(_update)
 
     def show_text(self, text: str, who: str = "bmo") -> None:
         def _update():

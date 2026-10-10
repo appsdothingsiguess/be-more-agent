@@ -5,6 +5,7 @@ from app.server.errors import (
     BMOError,
     RequestCancelled,
     ReservationTimeout,
+    ServerBusy,
     ServerUnavailable,
 )
 from app.server.reservation import Reservation, ReservationState
@@ -12,5 +13,5 @@ from app.server.reservation import Reservation, ReservationState
 __all__ = [
     "BMOClient", "InteractResult", "Reservation", "ReservationState",
     "BMOError", "AuthError", "ServerUnavailable", "RequestCancelled",
-    "BadResponse", "ReservationTimeout",
+    "BadResponse", "ReservationTimeout", "ServerBusy",
 ]

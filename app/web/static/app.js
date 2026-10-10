@@ -2,6 +2,7 @@
 "use strict";
 var $=function(id){return document.getElementById(id)};
 var es=null, backoff=1000, settings={}, live=null, offline=false;
+var statusText="";
 var srvPhase=null, srvMsg="", sending=false, recState=null, playingHere=false;
 var sessionMsgs=null;
 var indKey="", indSince=0, pending=null, sheetTimer=null;
@@ -217,6 +218,7 @@ function renderIndicator(){
   el.textContent="";
   var t=PTEXT[p]||p;
   if(p==="listening"&&srvMsg&&/follow/i.test(srvMsg))t="BMO is listening for a follow-up";
+  if(p==="thinking"&&statusText)t=statusText.replace(/\.+$/,"");
   var span=document.createElement("span");span.textContent=t;
   el.appendChild(span);
   if(p==="recording"){
@@ -254,6 +256,8 @@ function onEvent(ev){
   switch(ev.type){
   case "text":onText(ev);break;
   case "session":onSession(ev);break;
+  case "status":statusText=ev.text||"";renderIndicator();break;
+  case "memory":sysLine("BMO will remember that!");break;
   case "error":
     showBanner((ev.message||"Error")+(ev.hint?" - "+ev.hint:""));
     srvPhase=null;sending=false;renderIndicator();break;
@@ -261,9 +265,10 @@ function onEvent(ev){
   case "phase":
     sending=false;
     if(ev.phase==="idle"||ev.phase==="error"||ev.phase==="starting")srvPhase=null;else srvPhase=ev.phase;
+    if(ev.phase!=="thinking")statusText="";
     srvMsg=ev.message||"";renderIndicator();break;
   case "turn_done":
-    sending=false;srvPhase=null;renderIndicator();break;
+    sending=false;srvPhase=null;statusText="";renderIndicator();break;
   case "audio":
     if(ev.client_id===clientId&&output&&OUT[output].local)playReply(ev.url);
     break;
@@ -552,6 +557,11 @@ function loadMemories(){
       var sp=document.createElement("span"),nm=document.createElement("strong");
       nm.textContent=m.name?m.name.replace(/-/g," ")+(m.type?" ("+m.type+")":""):"";
       if(m.name)sp.appendChild(nm);sp.appendChild(document.createTextNode((m.name?" ":"")+(m.content||"")));
+      if(m.name){
+        var e=document.createElement("button");e.type="button";e.className="ghost";
+        e.textContent="Edit";e.setAttribute("aria-label","Edit memory: "+m.name);
+        e.addEventListener("click",function(){li.textContent="";li.appendChild(memEditor(m))});
+      }
       var b=document.createElement("button");b.type="button";b.className="ghost";
       b.textContent="Delete";b.setAttribute("aria-label","Delete memory: "+(m.name||m.content));
       b.addEventListener("click",function(){
@@ -560,12 +570,49 @@ function loadMemories(){
           loadMemories();
         });
       });
-      li.appendChild(sp);li.appendChild(b);list.appendChild(li);
+      li.appendChild(sp);if(e)li.appendChild(e);li.appendChild(b);list.appendChild(li);
     });
+    $("memAdd").classList.toggle("hidden",!(lt.available&&(!mems.length||mems[0].name)));
     $("memEmpty").textContent=!lt.available?"Long-term memory isn't set up on the server yet.":
       (mems.length?"":"BMO doesn't remember anything yet.");
   });
 }
+var MEMTYPES=["user","person","pet","preference","plan","fact"];
+// Inline form to edit a topic (m) or add a new one (m = null).
+function memEditor(m){
+  var f=document.createElement("form");f.className="memedit";
+  var name=document.createElement("input");name.type="text";name.placeholder="topic-name, e.g. favorite-food";
+  name.setAttribute("aria-label","Topic name");name.maxLength=40;
+  if(m){name.value=m.name;name.disabled=true}
+  var type=document.createElement("select");type.setAttribute("aria-label","Type");
+  MEMTYPES.forEach(function(t){var o=document.createElement("option");o.value=o.textContent=t;type.appendChild(o)});
+  type.value=m&&MEMTYPES.indexOf(m.type)>=0?m.type:"fact";
+  var text=document.createElement("textarea");text.rows=3;text.maxLength=1000;
+  text.placeholder="1-3 sentences";text.setAttribute("aria-label","What BMO remembers");
+  text.value=m?(m.content||""):"";
+  var row=document.createElement("div");row.className="row";
+  var save=document.createElement("button");save.type="submit";save.textContent="Save";
+  var cancel=document.createElement("button");cancel.type="button";cancel.className="ghost";cancel.textContent="Cancel";
+  cancel.addEventListener("click",function(){$("memErr").textContent="";loadMemories()});
+  row.appendChild(save);row.appendChild(cancel);
+  f.appendChild(name);f.appendChild(type);f.appendChild(text);f.appendChild(row);
+  f.addEventListener("submit",function(ev){
+    ev.preventDefault();save.disabled=true;
+    var nm=m?m.name:name.value.trim().toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
+    api("POST","/api/memories/save",{name:nm,type:type.value,content:text.value}).then(function(r){
+      save.disabled=false;
+      var d=r.data||{};
+      if(r.ok&&d.saved){$("memErr").textContent="";loadMemories()}
+      else $("memErr").textContent=d.error||(d.available===false?"Long-term memory isn't available.":"Could not save");
+    });
+  });
+  setTimeout(function(){(m?text:name).focus()},0);
+  return f;
+}
+$("memAdd").addEventListener("click",function(){
+  var li=document.createElement("li");li.appendChild(memEditor(null));
+  $("memList").insertBefore(li,$("memList").firstChild);
+});
 function renderSessInfo(){
   var m=has("memory.session_idle_minutes")?num(settings["memory.session_idle_minutes"]):null;
   var t="";

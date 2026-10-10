@@ -45,6 +45,7 @@ VOICE_INTERVAL = 1.0
 WAV_TYPES = ("audio/wav", "audio/x-wav", "audio/wave")
 CLIENT_RE = re.compile(r"^[A-Za-z0-9]{8,32}$")
 AUDIO_RE = re.compile(r"^/api/audio/([0-9a-f]{16})\.wav$")
+MEMORY_TYPES = ("user", "person", "pet", "preference", "plan", "fact")
 MEMORY_NAME_RE = re.compile(r"^(?=.{1,40}$)[a-z0-9]+(-[a-z0-9]+)*$")  # server topic names
 PAGE_CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
@@ -475,6 +476,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._memory_call("forget_memory")
         if path == "/api/memories/delete":
             return self._memory_delete(data)
+        if path == "/api/memories/save":
+            return self._memory_save(data)
         self._json(404, {"error": "not found"})
 
     def _static(self, rel: str) -> None:
@@ -630,6 +633,16 @@ class _Handler(BaseHTTPRequestHandler):
         if name is None and isinstance(mid, int) and not isinstance(mid, bool) and mid > 0:
             return self._memory_call("delete_memory", mid)
         self._json(400, {"error": "give a memory topic name or id"})
+
+    def _memory_save(self, data: dict) -> None:
+        name, kind, content = data.get("name"), data.get("type"), data.get("content")
+        if not (isinstance(name, str) and MEMORY_NAME_RE.fullmatch(name)):
+            return self._json(400, {"error": "Topic names are lowercase words joined by dashes"})
+        if kind not in MEMORY_TYPES:
+            return self._json(400, {"error": "Pick a type: " + ", ".join(MEMORY_TYPES)})
+        if not isinstance(content, str) or not content.strip() or len(content) > 1000:
+            return self._json(400, {"error": "Write 1-3 sentences"})
+        self._memory_call("save_memory", name, kind, content.strip())
 
     def _settings(self, data: dict) -> None:
         if not data:

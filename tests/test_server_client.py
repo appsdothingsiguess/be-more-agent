@@ -11,6 +11,7 @@ from app.server import (
     AuthError,
     BadResponse,
     BMOClient,
+    ServerBusy,
     ServerUnavailable,
 )
 from tests.fake_bmo_server import FakeBMOServer
@@ -258,3 +259,116 @@ def test_actions_and_statuses_are_parsed(server, client):
 def test_older_server_has_no_actions(client):
     r = client.interact(text="hi")
     assert r.actions == () and r.statuses == ()
+
+
+def test_face_music_song_and_memory_changes_are_parsed(server, client):
+    server.interact_extra = {
+        "actions": [{"type": "face", "name": "surprised"}, {"type": "music", "name": "dance_party"},
+                    {"type": "face"}],
+        "song": {"mood": "silly"},
+        "memory_changes": [{"op": "create", "name": "dog-finn"}, {"op": "explode"}, "x"]}
+    r = client.interact(text="hi")
+    assert [(a.type, a.name) for a in r.actions] == [("face", "surprised"), ("music", "dance_party")]
+    assert r.actions[1].audio_wav is None
+    assert r.song == "silly"
+    assert r.memory_changes == ({"op": "create", "name": "dog-finn"},)
+
+
+def _stream_server(server):
+    wav = base64.b64encode(b"RIFFcoin").decode()
+    server.interact_extra = {"emotion": "happy", "song": {"mood": "happy"},
+                             "actions": [{"type": "expression", "name": "wink"},
+                                         {"type": "sound", "name": "coin",
+                                          "audio_wav_base64": wav}]}
+    server.stream_events = [
+        {"type": "transcript", "text": "hello"},
+        {"type": "status", "status": "searching_memories", "text": "Searching memories...",
+         "face": "thinking", "expression": "look_around"},
+        {"type": "expression", "name": "wink"},
+        {"type": "sound", "name": "coin", "audio_wav_base64": wav},
+        {"type": "song", "mood": "happy"},
+    ]
+
+
+def test_stream_events_in_order_and_result(server, client):
+    _stream_server(server)
+    seen = []
+    r = client.interact(text="hi", on_event=seen.append)
+    assert server.find("POST", "/v1/bmo/interact")[-1]["values"]["stream"] == "true"
+    kinds = [e["type"] if e["type"] != "action" else e["action"].type for e in seen]
+    assert kinds == ["transcript", "status", "expression", "sound", "song"]
+    assert seen[1]["text"] == "Searching memories..."
+    # Sounds keep the audio from the stream (the result repeats them without it).
+    assert [(a.type, a.name) for a in r.actions] == [("expression", "wink"), ("sound", "coin")]
+    assert r.actions[1].audio_wav == b"RIFFcoin"
+    assert r.text == "hi there" and r.emotion == "happy" and r.song == "happy"
+    assert r.audio_wav and "type" not in r.raw
+
+
+def test_no_stream_field_without_callback(server, client):
+    _stream_server(server)
+    r = client.interact(text="hi")
+    assert "stream" not in server.find("POST", "/v1/bmo/interact")[-1]["values"]
+    assert r.actions[1].audio_wav == b"RIFFcoin"
+
+
+def test_stream_falls_back_to_json_on_older_server(server, client):
+    seen = []
+    r = client.interact(text="hi", on_event=seen.append)
+    assert r.text == "hi there" and seen == []
+
+
+@pytest.mark.parametrize("event,exc", [
+    ({"type": "error", "status": 504, "detail": "deadline"}, ServerUnavailable),
+    ({"type": "error", "status": 503, "code": "large_model_session_active", "detail": "Tiel"},
+     ServerBusy),
+    ({"type": "error", "status": 422, "detail": "bad"}, BadResponse),
+])
+def test_stream_error_event(server, client, event, exc):
+    server.stream_events = [{"type": "status", "text": "x"}, event]
+    with pytest.raises(exc):
+        client.interact(text="hi", on_event=lambda e: None)
+
+
+def test_stream_without_result_is_bad_response(server, client):
+    server.stream_events = []
+    server.interact_extra = {}
+
+    def route(rec, orig=server._route):
+        status, payload, raw = orig(rec)
+        return (status, None, raw.split(b"data: {\"type\": \"result\"")[0] or b"data: {}\n\n") \
+            if raw else (status, payload, raw)
+    server._route = route
+    with pytest.raises(BadResponse):
+        client.interact(text="hi", on_event=lambda e: None)
+
+
+def test_callback_exception_aborts(server, client):
+    _stream_server(server)
+
+    class Stop(Exception):
+        pass
+
+    def cb(e):
+        raise Stop()
+    with pytest.raises(Stop):
+        client.interact(text="hi", on_event=cb)
+
+
+def test_plain_503_detail_is_busy(server, client):
+    server._route = lambda rec: (503, {"detail": "large_model_session_active"}, None)
+    with pytest.raises(ServerBusy) as e:
+        client.interact(text="hi")
+    assert e.value.code == "large_model_session_active"
+
+
+def test_put_memory(server, client):
+    topic = client.put_memory("favorite-food", "preference", "Loves pizza.")
+    assert topic["name"] == "favorite-food"
+    assert server.find("PUT", "/v1/bmo/memories/favorite-food")[-1]["json"] == {
+        "type": "preference", "content": "Loves pizza."}
+    with pytest.raises(BadResponse) as e:
+        client.put_memory("x", "fact", " ")
+    assert e.value.status == 422 and "sentences" in e.value.detail
+    server.memory_routes = False
+    assert client.put_memory("x", "fact", "Hi.") is None

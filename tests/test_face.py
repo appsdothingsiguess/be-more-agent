@@ -270,6 +270,15 @@ class FakeCanvas:
     def create_line(self, *coords, **kw):
         return self._add("line", coords, kw)
 
+    def create_text(self, *coords, **kw):
+        return self._add("text", coords, kw)
+
+    def create_rectangle(self, *coords, **kw):
+        return self._add("rect", coords, kw)
+
+    def tag_raise(self, i):
+        self.raised = getattr(self, "raised", []) + [i]
+
     def _add(self, kind, coords, kw):
         i, self.next = self.next, self.next + 1
         self.items[i] = {"kind": kind, "coords": coords, "state": "normal", **kw}
@@ -289,12 +298,14 @@ def test_gui_draw_face_reuses_and_hides_canvas_items(faces):
     from app.ui import gui
     ui = gui.TkUI.__new__(gui.TkUI)
     ui.w, ui.h = 800, 480
-    ui.canvas, ui._face_items = FakeCanvas(), []
+    ui.canvas, ui._face_items, ui._overlay_items = FakeCanvas(), [], {}
     ui.animator = face.FaceAnimator(faces, random.Random(9))
     ui.animator.set_state(BotState.IDLE, 0)
     ui.animator.tick(0)
     ui._draw_face()
-    shown = lambda: [i for i in ui.canvas.items.values() if i["state"] == "normal"]
+    face_kinds = ("poly", "line")
+    shown = lambda: [i for i in ui.canvas.items.values()
+                     if i["state"] == "normal" and i["kind"] in face_kinds]
     first = len(shown())
     assert first >= 3 and ui.canvas.bg == "#c2deac"
     ids = set(ui.canvas.items)
@@ -304,12 +315,12 @@ def test_gui_draw_face_reuses_and_hides_canvas_items(faces):
         ui.animator.tick(0.1 + k * 0.033)
     ui._draw_face()
     assert ids <= set(ui.canvas.items) or len(ui.canvas.items) >= first   # pooled, not leaked
-    assert len(ui.canvas.items) <= 12
+    assert len([i for i in ui.canvas.items.values() if i["kind"] in face_kinds]) <= 12
     ui.animator.set_state(BotState.ERROR, 5)
     for k in range(120):
         ui.animator.tick(5 + k * 0.033)
     ui._draw_face()
-    assert all(i["kind"] in ("poly", "line") for i in ui.canvas.items.values())
+    assert all(i["kind"] in ("poly", "line", "text", "rect") for i in ui.canvas.items.values())
     lines = [i for i in ui.canvas.items.values() if i["kind"] == "line" and i["state"] == "normal"]
     assert lines and all(i["capstyle"] == "round" or "capstyle" not in i for i in lines)
 
@@ -328,7 +339,7 @@ def test_moves_shift_the_face_and_end(faces):
     run(a, 0.0, 0.5)
     dx, dy = a.offsets()["mouth"]
     assert abs(dx) + abs(dy) > 1
-    run(a, 0.5, face.MOVES["dance"])
+    run(a, 0.5, face.MOVES["dance"].seconds)
     assert a._move is None and a.offsets()["mouth"] == (0.0, 0.0)
 
 
@@ -349,3 +360,96 @@ def test_expression_action_face_names_and_unknowns(faces):
     assert a.play_expression("kiss", 0.0) and a.emotion == "kiss"
     assert not a.play_expression("moonwalk", 0.0)
     assert not a.play_expression("mouth_open", 0.0)
+
+
+@pytest.mark.parametrize("name", ["blink", "wink", "laugh", "look_around", "nod", "shake_head",
+                                  "bounce", "wiggle", "sparkle_eyes", "heart_eyes", "yawn",
+                                  "dance"])
+def test_every_server_expression_plays_and_ends(faces, name):
+    a = face.FaceAnimator(faces, random.Random(5))
+    a.set_state(BotState.IDLE, 0)
+    secs = a.play_expression(name, 0.0)
+    assert 0.3 <= secs <= 2.0
+    run(a, 0.0, secs / 2)
+    assert a._move is not None
+    run(a, secs / 2, secs + 0.2)
+    assert a._move is None and a.offsets()["mouth"] == (0.0, 0.0)
+
+
+def test_heart_and_star_eyes_replace_the_eyes(faces):
+    a = face.FaceAnimator(faces, random.Random(5))
+    a.set_state(BotState.IDLE, 0)
+    a.play_expression("heart_eyes", 0.0)
+    run(a, 0.0, 0.3)
+    heart = a.target.parts["eye-left"][0]
+    assert len(heart.pts) == 2 * face_svg.POINTS and heart.fill[0] > 200
+    assert a._expression(0.3) == "happy"
+    a.play_expression("sparkle_eyes", 2.0)
+    run(a, 2.0, 2.3)
+    assert a.target.parts["eye-right"][0].pts != heart.pts
+
+
+def test_look_around_moves_only_the_eyes(faces):
+    a = face.FaceAnimator(faces, random.Random(5))
+    a.set_state(BotState.THINKING, 0)
+    a.play_expression("look_around", 0.0)
+    off = a.offsets(0.375)
+    assert abs(off["eye-left"][0]) > 30 and off["mouth"] == (0.0, 0.0)
+
+
+def test_face_action_shows_even_while_thinking(faces):
+    a = face.FaceAnimator(faces, random.Random(5))
+    a.set_state(BotState.THINKING, 0)
+    assert a.show_face("surprised", 0.0)
+    assert a._expression(0.5) == "surprised"
+    assert a._expression(1.2) == "thinking"
+    assert not a.show_face("mouth_open", 0.0)
+
+
+def test_song_overlay_spreads_lyrics_over_the_reply(faces):
+    a = face.FaceAnimator(faces, random.Random(5))
+    a.set_state(BotState.THINKING, 0)
+    a.set_overlay("song", ["La la", "", "Finn is a dog", "The end"])
+    a.prepare_speech([0.5] * 150, 0.04)      # 6 s of audio
+    a.set_state(BotState.SPEAKING, 10.0)
+    assert a.lyric(10.5) == "La la"
+    assert a.lyric(13.0) == "Finn is a dog"
+    assert a.lyric(30.0) == "The end"
+    a.set_state(BotState.IDLE, 31.0)
+    assert a.overlay is None and a.lyric(31.0) == ""
+
+
+def test_caption_clears_when_thinking_ends(faces):
+    a = face.FaceAnimator(faces, random.Random(5))
+    a.set_state(BotState.THINKING, 0)
+    a.set_caption("Searching memories...")
+    a.set_state(BotState.SPEAKING, 1.0)
+    assert a.caption == ""
+
+
+def test_gui_overlay_shows_notes_lyrics_and_caption(faces):
+    from app.ui import gui
+    ui = gui.TkUI.__new__(gui.TkUI)
+    ui.w, ui.h = 800, 480
+    ui.canvas, ui._face_items, ui._overlay_items = FakeCanvas(), [], {}
+    a = ui.animator = face.FaceAnimator(faces, random.Random(9))
+    a.set_state(BotState.THINKING, 0)
+    a.set_caption("Searching memories...")
+    a.tick(0)
+    ui._draw_face()
+    visible = lambda kind: [i for i in ui.canvas.items.values()
+                            if i["kind"] == kind and i["state"] == "normal"]
+    assert [i["text"] for i in visible("text")] == ["Searching memories..."]
+    a.set_overlay("song", ["Finn is my friend"])
+    a.prepare_speech([0.5] * 100)
+    a.set_state(BotState.SPEAKING, 1.0)
+    ui._draw_face()
+    texts = [i["text"] for i in visible("text")]
+    assert "Finn is my friend" in texts and len(texts) == 4   # 3 notes + lyric
+    assert not visible("rect")
+    a.set_overlay("music")
+    ui._draw_face()
+    assert len(visible("rect")) == 9
+    a.set_state(BotState.IDLE, 9.0)
+    ui._draw_face()
+    assert not visible("text") and not visible("rect")

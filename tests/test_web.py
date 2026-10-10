@@ -239,6 +239,10 @@ class MemController(FakeController):
         self.deleted.append(name)
         return {"available": True, "deleted": True}
 
+    def save_memory(self, name, type, content):
+        self.saved = getattr(self, "saved", []) + [(name, type, content)]
+        return {"available": True, "saved": True, "error": None}
+
     def conversation(self):
         return [{"role": "user", "content": "hi"}]
 
@@ -250,7 +254,7 @@ def memweb(web):
 
 
 MEM_ROUTES = (("get", "/api/memories"), ("post", "/api/memories/forget"),
-              ("post", "/api/memories/delete"))
+              ("post", "/api/memories/delete"), ("post", "/api/memories/save"))
 
 
 def test_memory_requires_login(memweb):
@@ -513,3 +517,15 @@ def test_session_in_state(sesweb, sess):
 def test_session_new_unsupported(web, sess):
     assert sess.post(web.base + "/api/session/new", json={}).status_code == 501
     assert "session" not in sess.get(web.base + "/api/state").json()
+
+
+def test_memory_save(memweb, sess):
+    url = memweb.base + "/api/memories/save"
+    for body in ({}, {"name": "Food", "type": "fact", "content": "x"},
+                 {"name": "food", "type": "secret", "content": "x"},
+                 {"name": "food", "type": "fact", "content": " "},
+                 {"name": "food", "type": "fact", "content": "x" * 1001}):
+        assert sess.post(url, json=body).status_code == 400, body
+    r = sess.post(url, json={"name": "favorite-food", "type": "preference", "content": " Pizza. "})
+    assert r.status_code == 200 and r.json()["saved"] is True
+    assert memweb.ctrl.saved == [("favorite-food", "preference", "Pizza.")]

@@ -60,6 +60,9 @@ class FakeBMOServer:
         self.session_ended = True
         self.session_end_status = 200   # 403 = v1 server: route not allowed for BMO
         self.interact_extra: dict = {}
+        # Events sent before the result when the client asks for stream=true; None = this
+        # server predates streaming and answers JSON. A dict with type "error" ends the stream.
+        self.stream_events: list[dict] | None = None
         self.cancelled = threading.Event()
         self.interact_started = threading.Event()
         self._lock = threading.Lock()
@@ -101,6 +104,8 @@ class FakeBMOServer:
                 if raw is None:
                     raw = json.dumps(payload).encode()
                     ct = "application/json"
+                elif raw.startswith(b"data:"):
+                    ct = "text/event-stream"
                 else:
                     ct = "audio/wav"
                 self.send_response(status)
@@ -109,7 +114,7 @@ class FakeBMOServer:
                 self.end_headers()
                 self.wfile.write(raw)
 
-            do_GET = do_POST = do_DELETE = _handle
+            do_GET = do_POST = do_DELETE = do_PUT = _handle
 
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
         self._httpd.daemon_threads = True
@@ -155,6 +160,14 @@ class FakeBMOServer:
                     **self.interact_extra}
             if self.interact_audio_b64 is not None:
                 body["audio_wav_base64"] = self.interact_audio_b64
+            if self.stream_events is not None and (rec.get("values") or {}).get("stream") == "true":
+                events = list(self.stream_events)
+                if not any(e.get("type") == "error" for e in events):
+                    sounds_bare = [{k: v for k, v in a.items() if k != "audio_wav_base64"}
+                                   for a in body.get("actions", [])]
+                    events.append({"type": "result", **body, "actions": sounds_bare})
+                return 200, None, b"".join(b"data: " + json.dumps(e).encode() + b"\n\n"
+                                           for e in events)
             return 200, body, None
         if p == "/v1/audio/transcriptions":
             return 200, {"text": "transcribed"}, None
@@ -171,6 +184,14 @@ class FakeBMOServer:
         if p == "/v1/bmo/session/end" and m == "POST" and self.memory_routes:
             return self.session_end_status, {"ended": self.session_ended}, None
         mem = re.fullmatch(r"/v1/bmo/memories/([^/]+)", p)
+        if mem and m == "PUT" and self.memory_routes:
+            data = rec["json"] or {}
+            if not str(data.get("content") or "").strip():
+                return 422, {"detail": "content must be 1-3 sentences"}, None
+            topic = {"name": mem.group(1), "type": data.get("type"), "content": data["content"],
+                     "created_at": "2026-01-01", "updated_at": "2026-01-02"}
+            self.memories = [x for x in self.memories if x["name"] != topic["name"]] + [topic]
+            return 200, topic, None
         if mem and m == "DELETE" and self.memory_routes:
             keep = [x for x in self.memories if x["name"] != mem.group(1)]
             if len(keep) == len(self.memories):
