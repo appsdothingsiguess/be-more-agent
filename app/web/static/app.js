@@ -374,23 +374,29 @@ function setRecUi(on){
   $("micIcon").classList.toggle("hidden",on);
   $("levelBars").classList.toggle("hidden",!on);
 }
+// Recording gets its own AudioContext, made in the click and closed afterwards.
+// Sharing the playback context made the mic deliver silence after a reply had
+// played on this device (Chrome).
 function startRec(){
   if(rec||recState)return;
-  unlock();
+  unlock();stopLocal();
   $("sendErr").textContent="";
+  var C=window.AudioContext||window.webkitAudioContext;
+  if(!C){showBanner("Audio is not supported in this browser");return}
+  var c=new C();
+  recState="starting";
   navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}}).then(function(stream){
-    var c=ctx();
-    if(!c){stream.getTracks().forEach(function(t){t.stop()});showBanner("Audio is not supported in this browser");return}
     return c.resume().then(function(){return beginCapture(c,stream)});
   }).catch(function(e){
     var name=e&&e.name;
     showBanner(name==="NotAllowedError"?"Microphone permission was denied":"Could not start the microphone"+(e&&e.message?": "+e.message:""));
+    if(rec)releaseRec(rec);else closeCtx(c);
     rec=null;recState=null;setRecUi(false);renderIndicator();
   });
 }
-var workletLoaded=false;
+function closeCtx(c){try{if(c.state!=="closed")c.close()}catch(e){}}
 function beginCapture(c,stream){
-  var r={stream:stream,src:c.createMediaStreamSource(stream),chunks:[],n:0,rate:c.sampleRate,node:null,sink:null,
+  var r={ctx:c,stream:stream,src:c.createMediaStreamSource(stream),chunks:[],n:0,rate:c.sampleRate,node:null,sink:null,
     floor:0.005,speech:false,loud:0,lastSpeech:0,t0:Date.now(),done:false};
   rec=r;
   r.sink=c.createGain();r.sink.gain.value=0;r.sink.connect(c.destination);
@@ -414,7 +420,7 @@ function beginCapture(c,stream){
   };
   var p;
   if(c.audioWorklet&&window.AudioWorkletNode){
-    p=(workletLoaded?Promise.resolve():c.audioWorklet.addModule("/static/mic-worklet.js").then(function(){workletLoaded=true}))
+    p=c.audioWorklet.addModule("/static/mic-worklet.js")
       .then(function(){
         var n=new AudioWorkletNode(c,"bmo-mic",{numberOfInputs:1,numberOfOutputs:1,channelCount:1});
         n.port.onmessage=function(e){onFrame(e.data)};
@@ -435,6 +441,7 @@ function releaseRec(r){
   try{r.src.disconnect()}catch(e){}
   try{r.sink.disconnect()}catch(e){}
   r.stream.getTracks().forEach(function(t){t.stop()});
+  closeCtx(r.ctx);
   rec=null;setRecUi(false);
 }
 function cancelRec(){
@@ -444,7 +451,11 @@ function finishRec(){
   var r=rec;if(!r||r.done)return;
   releaseRec(r);
   var secs=r.n/r.rate;
-  if(secs<MINSEC||!r.speech){recState=null;renderIndicator();return}
+  if(secs<MINSEC||!r.speech){
+    recState=null;renderIndicator();
+    $("sendErr").textContent="Didn't hear anything. Try again closer to the mic.";
+    return;
+  }
   var all=new Float32Array(r.n), off=0;
   r.chunks.forEach(function(f){all.set(f,off);off+=f.length});
   var wav=encodeWav(resample(all,r.rate,16000),16000);
