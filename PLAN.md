@@ -64,6 +64,7 @@ SPEAKING: decode `audio_wav_base64` → `aplay` on the USB speaker → IDLE.
 Interrupt (Start during THINKING/SPEAKING): stop playback right away → invalidate the in-flight
 interaction so its response is discarded and never replayed → `POST /v1/requests/{id}/cancel`
 → before the next inference, wait for `/v1/status` bmo_ready and re-confirm the reservation.
+If it cut off Pi speech, `turn_done` carries `interrupted` and the live listener opens a follow-up.
 
 Reservation: 200 = ready; 202 = poll `/v1/status` until `bmo_ready`, then POST again and require
 200. It is renewed on use (lifetime 300 s) and released with DELETE on exit/SIGTERM.

@@ -1537,3 +1537,40 @@ def test_audio_stream_is_off_by_default_and_each_turn_logs_its_mode(rig, caplog)
     run_text(rig)
     assert "Turn audio: asked=stream got=stream" in caplog.text
     assert "Reply audio starts (audio=stream)" in caplog.text
+
+
+def test_interrupt_while_speaking_marks_turn_done_interrupted(rig):
+    rig.spk.block = True
+    events = collect(rig.ctl)
+    rig.ctl.submit_text("hi")
+    assert rig.spk.playing.wait(5)
+    rig.ctl.interrupt()
+    _join_turns()
+    done = of(events, "turn_done")
+    assert len(done) == 1
+    assert done[0]["interrupted"] is True and done[0]["spoke_on_pi"] is True
+    assert done[0]["ok"] is False
+
+
+def test_preempt_while_speaking_is_not_marked_interrupted(rig):
+    rig.spk.block = True
+    events = collect(rig.ctl)
+    rig.ctl.submit_text("hi")
+    assert rig.spk.playing.wait(5)
+    rig.spk.block = None
+    rig.ctl.submit_text("something else")
+    rig.ctl.wait_idle(5)
+    _join_turns()
+    first = of(events, "turn_done")[0]
+    assert first["interrupted"] is False and first["spoke_on_pi"] is False
+
+
+def test_interrupt_while_thinking_is_not_marked_interrupted(rig):
+    rig.client.block = threading.Event()
+    events = collect(rig.ctl)
+    rig.ctl.submit_text("hi")
+    assert rig.client.entered.wait(5)
+    rig.ctl.interrupt()
+    rig.client.block.set()
+    _join_turns()
+    assert of(events, "turn_done")[0]["interrupted"] is False

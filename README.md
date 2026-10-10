@@ -87,7 +87,7 @@ Edit `config.json` (copied from `config.example.json`). Any subset of keys overr
 | `wake_word.enabled`, `.model`, `.custom_model`, `.threshold` | `false`, `hey_jarvis`, `models/hey_bmo.onnx`, `0.5` | Hands-free wake word (openWakeWord, runs on the Pi). The custom model is used when the file exists |
 | `microphone.backend` | `auto` | `stream` = one always-on capture shared by wake word, auto-stop and recording (auto picks it when the wake-word packages are installed); `file` = the old press-to-start/press-to-stop recording |
 | `listen.end_silence_seconds`, `.no_speech_timeout` | `0.9`, `6` | Auto-stop after this much silence; give up if nobody speaks |
-| `listen.followup`, `.followup_seconds` | `true`, `5` | After BMO answers out loud, listen again briefly without the wake word |
+| `listen.followup`, `.followup_seconds` | `true`, `5` | After BMO answers out loud (or you cut it off mid-reply), listen again briefly without the wake word |
 | `listen.followup_min_speech_seconds` | `0.15` | In a follow-up, sounds shorter than this (clicks, echo) are ignored instead of ending the turn |
 | `memory.enabled`, `.max_messages`, `.max_chars`, `.session_idle_minutes` | `true`, `10`, `6000`, `30` | Conversation memory: recent exchanges (saved to `runtime/memory.json`) are sent with each turn, and the server's long-term recall is used. Saying or typing "forget everything" wipes both |
 
@@ -195,12 +195,14 @@ Endpoints used: `GET /v1/status`, `GET /v1/models`, `POST /v1/bmo/reservation`, 
 
 **Reservation.** Before inference the client reserves the GPU. A `200` means ready. A `202` means the server is restoring, so the client polls `/v1/status` until `bmo_ready`, then POSTs again and requires `200`. The reservation lasts 300 s and is renewed on use (the client renews after 240 s idle). It is released with `DELETE` on exit or SIGTERM.
 
-**Interruption.** Pressing Start (or `i`) while thinking or speaking:
+**Interruption.** Pressing Start (or `i`, or Stop on the web page) while thinking or speaking:
 
 1. stops the speaker immediately,
 2. marks the in-flight interaction stale so its response is dropped and never played,
 3. cancels it on the server via `POST /v1/requests/{id}/cancel` using its `X-Request-ID`,
 4. before the next request, waits for `/v1/status` `bmo_ready` and re-confirms the reservation, because a cancel acknowledgement does not mean the GPU is clean.
+
+If you cut BMO off while it was speaking on the Pi (not a web turn), it then listens for a follow-up as after a finished reply, so you can just talk; right after a cut-off reply the wake word alone was missed for many seconds. Sending a new message, starting a new session or shutting down also interrupts, but opens no follow-up.
 
 ## Testing
 

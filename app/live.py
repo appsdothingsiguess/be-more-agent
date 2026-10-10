@@ -6,7 +6,8 @@ API only. Modes:
   ARMED   scoring frames for the wake word while the controller is idle
   TURN    controller is LISTENING; the Endpointer decides when to stop
   MUTED   controller busy (thinking/capturing/speaking/Pi playback) plus a tail
-Follow-up is a TURN started by us after a Pi-spoken, successful, non-web turn.
+Follow-up is a TURN started by us after a Pi-spoken, successful (or cut off by the
+user), non-web turn.
 """
 from __future__ import annotations
 
@@ -173,7 +174,8 @@ class LiveListener:
                 key = str(ev.get("key", ""))
                 if key == "wake_word.enabled" or key.startswith("listen.followup"):
                     self._dirty = True
-            elif (ev.get("ok") and ev.get("spoke_on_pi") and ev.get("source") != "web"
+            elif ((ev.get("ok") or ev.get("interrupted")) and ev.get("spoke_on_pi")
+                  and ev.get("source") != "web"
                   and not ev.get("goodbye") and self.cfg.listen.followup):
                 self._followup_pending = True
                 if self._mode != MUTED:  # speech already over: just the tail

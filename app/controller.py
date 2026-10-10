@@ -16,8 +16,9 @@ Event feed (dicts passed to subscribers, each also carries "time"). Schema:
                phase: starting|idle|listening|looking|thinking|waiting_gpu|speaking|error
   audio      {turn, url: "/api/audio/<id>.wav", client_id, source, duration}
                emitted when a reply WAV is saved, before any Pi playback
-  turn_done  {turn, source, client_id, ok, spoke_on_pi, goodbye}   once per turn, also on interrupt;
-               goodbye = the user said farewell: no follow-up, session ends
+  turn_done  {turn, source, client_id, ok, spoke_on_pi, goodbye, interrupted}   once per turn,
+               also on interrupt; goodbye = the user said farewell: no follow-up, session ends;
+               interrupted = the user cut BMO off mid-reply on the Pi: listen for a follow-up
   live       {armed, model, error, ...}           published by others via publish(); sticky
   setting    {key, value}                         after a live setting is applied
   status     {turn, status, text}                 BMO is working on something during a turn
@@ -739,7 +740,7 @@ class InteractionController:
 
     def _preempt(self) -> None:
         if self._state in BUSY:
-            self.interrupt()
+            self.interrupt(followup=False)
         elif self._state is BotState.LISTENING:
             self.cancel_listening()
 
@@ -944,10 +945,14 @@ class InteractionController:
         return self.replies.path(turn_id)
 
     # -------------------------------------------------------------- interrupt
-    def interrupt(self) -> None:
+    def interrupt(self, followup: bool = True) -> None:
+        """Stop the current turn. followup: if BMO was speaking on the Pi, the turn_done says
+        so (interrupted), and the live listener opens a follow-up window to hear the user right
+        away; the wake word alone was missed for many seconds after a cut-off reply."""
         if self._state is BotState.LISTENING:
             self.cancel_listening()
             return
+        cut_off = followup and self._state is BotState.SPEAKING
         # 1. Stop physical playback immediately.
         try:
             self.speaker.stop()
@@ -968,7 +973,8 @@ class InteractionController:
         self._set_state(BotState.IDLE, "Interrupted")
         turn = self._turn
         if turn is not None:
-            self._finish_turn(turn, ok=False, spoke=False)
+            self._finish_turn(turn, ok=False, spoke=cut_off and turn.play_on_pi,
+                              interrupted=cut_off)
 
     # ------------------------------------------------------------------ turns
     def _spawn(self, turn: Turn, *, record: bool = False, text: str | None = None,
@@ -980,7 +986,7 @@ class InteractionController:
                                  "own_audio": own_audio},
                          name=f"bmo-turn-{turn.gen}", daemon=True).start()
 
-    def _finish_turn(self, turn: Turn, ok: bool, spoke: bool) -> None:
+    def _finish_turn(self, turn: Turn, ok: bool, spoke: bool, interrupted: bool = False) -> None:
         """Emit turn_done exactly once per turn and release it."""
         with self._lock:
             if turn.done:
@@ -990,7 +996,7 @@ class InteractionController:
                 self._turn = None
         self._emit({"type": "turn_done", "turn": turn.id, "source": turn.source,
                     "client_id": turn.client_id, "ok": ok, "spoke_on_pi": spoke,
-                    "goodbye": turn.goodbye})
+                    "goodbye": turn.goodbye, "interrupted": interrupted})
         if turn.goodbye and ok:
             # Conversation over: save it to long-term memory and start fresh for next time.
             threading.Thread(target=self.end_session, args=("goodbye",),
@@ -1359,7 +1365,7 @@ class InteractionController:
             except Exception:
                 pass
         if self._state in BUSY:
-            self.interrupt()
+            self.interrupt(followup=False)
         try:
             self.speaker.stop()
         except Exception:

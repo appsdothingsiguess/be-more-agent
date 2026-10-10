@@ -229,6 +229,25 @@ def test_no_followup_for_web_failed_silent_or_disabled():
         assert not [c for c in r.calls() if c[0] == "start"], ev
 
 
+def test_followup_after_user_cut_bmo_off():
+    r = Rig()
+    r.ctl.state = BotState.SPEAKING
+    r.step()
+    r.ctl.state = BotState.IDLE
+    r.ctl.publish(done(ok=False, interrupted=True))
+    r.step(4)
+    assert ("start", "followup") in r.calls()
+
+
+def test_no_followup_after_interrupt_without_pi_speech_or_from_web():
+    for ev in (done(ok=False, interrupted=True, spoke_on_pi=False),
+               done(ok=False, interrupted=True, source="web")):
+        r = Rig()
+        r.ctl.publish(ev)
+        r.step(8)
+        assert not [c for c in r.calls() if c[0] == "start"], ev
+
+
 def test_followup_cancelled_by_new_busy_turn():
     r = Rig()
     r.ctl.publish(done())
