@@ -73,3 +73,19 @@ def test_abort(tmp_path):
     mic.start()
     mic.abort()
     assert procs[0].returncode == -9 and not mic.is_recording
+
+
+def test_use_device_redoes_mixer_on_new_card(tmp_path):
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stderr="")
+    mic = Microphone(MicrophoneConfig(), tmp_path, run=run, cards=[])
+    assert mic.resolved.source == "fallback"
+    from app.hardware.alsa import resolve_device
+    mic.use_device(resolve_device("auto", "USB PnP", "x", CARDS))
+    assert mic.card == "Device" and calls and all(c[:3] == ["amixer", "-c", "Device"] for c in calls)
+    n = len(calls)
+    mic.use_device(resolve_device("auto", "USB PnP", "x", CARDS))
+    assert len(calls) == n

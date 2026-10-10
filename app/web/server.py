@@ -45,6 +45,7 @@ VOICE_INTERVAL = 1.0
 WAV_TYPES = ("audio/wav", "audio/x-wav", "audio/wave")
 CLIENT_RE = re.compile(r"^[A-Za-z0-9]{8,32}$")
 AUDIO_RE = re.compile(r"^/api/audio/([0-9a-f]{16})\.wav$")
+MEMORY_NAME_RE = re.compile(r"^(?=.{1,40}$)[a-z0-9]+(-[a-z0-9]+)*$")  # server topic names
 PAGE_CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
             "media-src 'self' blob:; connect-src 'self'; worker-src 'self'")
@@ -623,10 +624,12 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(200, fn(*args))
 
     def _memory_delete(self, data: dict) -> None:
-        mid = data.get("id")
-        if not isinstance(mid, int) or isinstance(mid, bool) or mid <= 0:
-            return self._json(400, {"error": "id must be a positive integer"})
-        self._memory_call("delete_memory", mid)
+        name, mid = data.get("name"), data.get("id")   # topic name (v2 server) or id (v1)
+        if isinstance(name, str) and MEMORY_NAME_RE.fullmatch(name):
+            return self._memory_call("delete_memory", name)
+        if name is None and isinstance(mid, int) and not isinstance(mid, bool) and mid > 0:
+            return self._memory_call("delete_memory", mid)
+        self._json(400, {"error": "give a memory topic name or id"})
 
     def _settings(self, data: dict) -> None:
         if not data:

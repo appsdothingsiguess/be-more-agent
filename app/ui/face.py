@@ -82,6 +82,11 @@ MOUTH_VARIANTS = {
 # Not emotions: driven by state, by blinking, or by speech.
 NOT_EMOTIONS = ("blink", "error", "listening")
 
+# Server "expression" actions that are motions rather than faces, with their length in seconds.
+MOVES = {"dance": 2.6, "wink": 0.7, "jump": 0.8, "nod": 1.0, "shake": 1.0}
+MOVE_ALIASES = {"spin": "dance", "wiggle": "dance", "boogie": "dance", "bounce": "jump",
+                "hop": "jump", "shake_head": "shake"}
+
 
 def emotion_names(faces: dict) -> list:
     """Every expression BMO may pick for itself, in file order (for the server's tool schema)."""
@@ -121,6 +126,8 @@ class FaceAnimator:
         self._drift = (0.0, 0.0)
         self._drift_goal = (0.0, 0.0)
         self._next_drift = 1.0
+        self._move: str | None = None
+        self._move_start = self._move_end = 0.0
         self._last = None
         self._target_key = None
         self._first = True
@@ -153,6 +160,38 @@ class FaceAnimator:
             return
         self.emotion = name
         self.emotion_until = now + 60.0 if self.state == BotState.SPEAKING else now + EMOTION_HOLD_S
+
+    def play_expression(self, name: str, now: float) -> bool:
+        """A server 'expression' action: a move (dance, wink, ...) or a face name.
+        False if BMO has no such expression."""
+        key = name.strip().lower() if isinstance(name, str) else ""
+        key = MOVE_ALIASES.get(key, key)
+        if key in MOVES:
+            self._move, self._move_start, self._move_end = key, now, now + MOVES[key]
+            self.dirty = True
+            return True
+        if key in self.faces and key in emotion_names(self.faces):
+            self.set_emotion(key, now)
+            return True
+        return False
+
+    def _move_offset(self, now: float) -> tuple[float, float]:
+        """Whole-face shift in SVG units for the running move; eases in and out."""
+        if self._move is None or now >= self._move_end:
+            return (0.0, 0.0)
+        dur = self._move_end - self._move_start
+        t = now - self._move_start
+        env = math.sin(math.pi * t / dur)
+        if self._move == "dance":
+            return (38 * math.sin(2 * math.pi * 1.5 * t) * env,
+                    -20 * abs(math.sin(2 * math.pi * 1.5 * t)) * env)
+        if self._move == "jump":
+            return (0.0, -70 * env)
+        if self._move == "nod":
+            return (0.0, 24 * math.sin(2 * math.pi * 2 * t / dur) * env)
+        if self._move == "shake":
+            return (28 * math.sin(2 * math.pi * 3 * t / dur) * env, 0.0)
+        return (0.0, 0.0)
 
     def prepare_speech(self, envelope: list, window: float = ENV_WINDOW_S) -> None:
         """Hand over the reply's loudness just before set_state(SPEAKING)."""
@@ -196,8 +235,9 @@ class FaceAnimator:
                 self._mouth = band
         return self._mouth
 
-    def _retarget(self, expr: str, mouth: str | None, blinking: bool) -> None:
-        key = (expr, mouth, blinking)
+    def _retarget(self, expr: str, mouth: str | None, blinking: bool,
+                  wink: bool = False) -> None:
+        key = (expr, mouth, blinking, wink)
         if key == self._target_key:
             return
         self._target_key = key
@@ -211,6 +251,8 @@ class FaceAnimator:
         if blinking and "blink" in self.faces:
             for part in ("eye-left", "eye-right"):
                 tgt.parts[part] = [s.copy() for s in self.faces["blink"].parts[part]]
+        if wink and "blink" in self.faces and "eye-right" in self.faces["blink"].parts:
+            tgt.parts["eye-right"] = [s.copy() for s in self.faces["blink"].parts["eye-right"]]
         face_svg.pad_pair(self.current, tgt)
         self.target = tgt
         if self._first:
@@ -235,9 +277,13 @@ class FaceAnimator:
         if self.state == BotState.SPEAKING:
             self._mouth = self._pick_mouth(now)
             mouth = self._mouth
-        self._retarget(expr, mouth, blinking)
+        moving = self._move is not None
+        if moving and now >= self._move_end:
+            self._move, moving = None, False
+            self.dirty = True                   # one last frame back at rest
+        self._retarget(expr, mouth, blinking, wink=moving and self._move == "wink")
 
-        moved = self._update_drift(now, dt)
+        moved = self._update_drift(now, dt) or moving
         rate = RATE_FAST if blinking else RATE_TALK if mouth else RATE_CALM
         delta = face_svg.approach(self.current, self.target, 1 - math.exp(-rate * dt))
         self._last = now
@@ -262,9 +308,14 @@ class FaceAnimator:
         self._drift = (nx, ny)
         return moved
 
-    def offsets(self) -> dict:
-        return {"eye-left": self._drift, "eye-right": self._drift,
-                "brow-left": self._drift, "brow-right": self._drift}
+    def offsets(self, now: float | None = None) -> dict:
+        now = self._last if now is None else now
+        mx, my = self._move_offset(now) if now is not None else (0.0, 0.0)
+        out = {name: (mx, my) for name in self.current.parts}
+        dx, dy = self._drift
+        for name in ("eye-left", "eye-right", "brow-left", "brow-right"):
+            out[name] = (dx + mx, dy + my)
+        return out
 
     def ops(self, scale_x: float, scale_y: float) -> list:
         return face_svg.draw_ops(self.current, scale_x, scale_y, self.offsets())

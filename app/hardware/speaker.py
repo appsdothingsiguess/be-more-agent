@@ -18,6 +18,7 @@ class Speaker:
         self.sounds_dir = Path(sounds_dir)
         self._popen = popen
         self._run = run
+        self._cards = cards
         self.resolved = alsa.resolve_device(cfg.device, cfg.match, cfg.fallback_device, cards)
         self.card = cfg.alsa_card if cfg.alsa_card is not None else self.resolved.card
         self._lock = threading.Lock()
@@ -38,6 +39,27 @@ class Speaker:
                 log.warning("amixer failed (%s): %s", " ".join(cmd), (r.stderr or "").strip())
         except Exception as e:
             log.warning("amixer error (%s): %s", " ".join(cmd), e)
+
+    def refresh(self) -> bool:
+        """Re-detect the speaker card (it may have been replugged under a new number).
+        Re-applies the volume when it moved, since a replugged speaker boots at 30%."""
+        if self.cfg.device != "auto":
+            return False
+        try:
+            r = alsa.resolve_device(self.cfg.device, self.cfg.match, self.cfg.fallback_device,
+                                    self._cards)
+        except Exception as e:
+            log.warning("Speaker detection failed: %s", e)
+            return False
+        if r.device == self.resolved.device:
+            return False
+        log.info("Speaker device changed: %s -> %s", self.resolved.device, r.device)
+        self.resolved = r
+        if self.cfg.alsa_card is None:
+            self.card = r.card
+        if r.source == "match":
+            self.configure()
+        return True
 
     @property
     def is_playing(self) -> bool:
@@ -61,6 +83,7 @@ class Speaker:
             self._kill(proc)
 
     def play(self, path, *, block: bool = True) -> bool:
+        self.refresh()
         with self._lock:
             self._gen += 1
             gen = self._gen

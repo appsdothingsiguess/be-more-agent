@@ -46,12 +46,28 @@ var OUT={
   text:{speak:false,pi:false,local:false}
 };
 var output=null;
+// "Text only" is the Pi's saved mute (ui.text_only), so it also covers voice turns and the
+// startup greeting; the other choices only pick where this device's replies play.
 function initOutput(s){
   var v=store("l","bmo.output");
-  if(!v||!OUT[v])v=s["ui.text_only"]?"text":"bmo";
-  output=v;renderOutput();
+  if(v==="text"&&!s["ui.text_only"]&&!store("l","bmo.output.synced")){
+    store("l","bmo.output.synced","1");post("ui.text_only",true);   // older page: browser-only mute
+    output="text";renderOutput();return;
+  }
+  store("l","bmo.output.synced","1");
+  if(!v||!OUT[v])v="bmo";
+  output=v;syncOutput(s);
 }
-function setOutput(v){output=v;store("l","bmo.output",v);renderOutput()}
+function setOutput(v){
+  output=v;store("l","bmo.output",v);renderOutput();
+  if(has("ui.text_only")&&!!settings["ui.text_only"]!==(v==="text"))post("ui.text_only",v==="text");
+}
+function syncOutput(s){
+  if(!output||!("ui.text_only" in s))return;
+  if(s["ui.text_only"]&&output!=="text"){output="text";store("l","bmo.output","text")}
+  else if(!s["ui.text_only"]&&output==="text"){output="bmo";store("l","bmo.output","bmo")}
+  renderOutput();
+}
 function renderOutput(){
   var bs=$("outSeg").querySelectorAll("button");
   for(var i=0;i<bs.length;i++)bs[i].setAttribute("aria-checked",bs[i].getAttribute("data-out")===output?"true":"false");
@@ -94,6 +110,7 @@ function applySettings(s){
   if(has("memory.enabled"))$("s-mem").checked=!!settings["memory.enabled"];
   if(has("memory.session_idle_minutes")){$("s-idle").value=num(settings["memory.session_idle_minutes"]);$("s-idle-v").textContent=num(settings["memory.session_idle_minutes"])}
   renderSessInfo();
+  syncOutput(settings);
 }
 function post(key,val){
   var b={};b[key]=val;
@@ -517,11 +534,13 @@ function loadMemories(){
     var mems=lt.available?(lt.memories||[]):[];
     mems.forEach(function(m){
       var li=document.createElement("li");
-      var sp=document.createElement("span");sp.textContent=m.content;
+      var sp=document.createElement("span"),nm=document.createElement("strong");
+      nm.textContent=m.name?m.name.replace(/-/g," ")+(m.type?" ("+m.type+")":""):"";
+      if(m.name)sp.appendChild(nm);sp.appendChild(document.createTextNode((m.name?" ":"")+(m.content||"")));
       var b=document.createElement("button");b.type="button";b.className="ghost";
-      b.textContent="Delete";b.setAttribute("aria-label","Delete memory: "+m.content);
+      b.textContent="Delete";b.setAttribute("aria-label","Delete memory: "+(m.name||m.content));
       b.addEventListener("click",function(){
-        api("POST","/api/memories/delete",{id:m.id}).then(function(d){
+        api("POST","/api/memories/delete",m.name?{name:m.name}:{id:m.id}).then(function(d){
           $("memErr").textContent=d.ok?"":(d.data.error||"Could not delete");
           loadMemories();
         });

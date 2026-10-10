@@ -10,6 +10,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
+from urllib.parse import quote
 from typing import Any
 
 import requests
@@ -36,6 +37,46 @@ def clean_emotion(value) -> str:
 
 
 @dataclass(frozen=True)
+class Action:
+    """Something BMO chose to do with its reply: an expression animation or a sound."""
+    type: str                       # "expression" or "sound"
+    name: str
+    audio_wav: bytes | None = None  # sounds only
+
+
+def clean_actions(value) -> tuple:
+    """The server's actions, in order. Odd entries (unknown type, no name, bad audio) are
+    dropped one by one so a single bad action never fails the turn."""
+    out = []
+    for a in value if isinstance(value, list) else ():
+        if not isinstance(a, dict) or not isinstance(a.get("name"), str) or not a["name"]:
+            continue
+        if a.get("type") == "expression":
+            out.append(Action("expression", a["name"]))
+        elif a.get("type") == "sound":
+            try:
+                wav = base64.b64decode(a.get("audio_wav_base64") or "", validate=True)
+            except (binascii.Error, ValueError, TypeError):
+                wav = b""
+            if wav:
+                out.append(Action("sound", a["name"], wav))
+            else:
+                log.warning("Dropping sound action %r without valid audio", a["name"])
+    return tuple(out)
+
+
+def clean_statuses(value) -> tuple:
+    """Progress messages ("Searching memories..."): plain strings, or dicts with text/message."""
+    out = []
+    for s in value if isinstance(value, list) else ():
+        if isinstance(s, dict):
+            s = s.get("text") or s.get("message")
+        if isinstance(s, str) and s.strip():
+            out.append(s.strip())
+    return tuple(out)
+
+
+@dataclass(frozen=True)
 class InteractResult:
     request_id: str
     transcript: str | None
@@ -44,6 +85,8 @@ class InteractResult:
     audio_wav: bytes | None
     raw: dict
     emotion: str = "neutral"   # one of EMOTIONS; anything else becomes neutral
+    actions: tuple = ()        # Action, in the order BMO did them
+    statuses: tuple = ()       # str
 
 
 class BMOClient:
@@ -125,7 +168,8 @@ class BMOClient:
         ok: tuple[int, ...] | None = None,
         **kwargs: Any,
     ) -> requests.Response:
-        headers = self._auth_headers(request_id) if auth else {}
+        headers = {**(self._auth_headers(request_id) if auth else {}),
+                   **kwargs.pop("headers", {})}
         if timeout is None:
             timeout = (self.cfg.connect_timeout, self.cfg.request_timeout)
         t0 = time.monotonic()
@@ -233,6 +277,10 @@ class BMOClient:
                 audio = base64.b64decode(b64, validate=True)
             except (binascii.Error, ValueError, TypeError) as e:
                 raise BadResponse("invalid base64 audio", status=r.status_code) from e
+        actions = clean_actions(raw.get("actions"))
+        if isinstance(raw.get("actions"), list):   # keep raw small: no sound blobs
+            raw["actions"] = [{k: v for k, v in a.items() if k != "audio_wav_base64"}
+                              if isinstance(a, dict) else a for a in raw["actions"]]
         return InteractResult(
             request_id=rid,
             transcript=raw.get("transcript"),
@@ -241,6 +289,8 @@ class BMOClient:
             audio_wav=audio,
             raw=raw,
             emotion=clean_emotion(raw.get("emotion")),
+            actions=actions,
+            statuses=clean_statuses(raw.get("statuses")),
         )
 
     # -- long-term memory (404 = server has no memory routes) --------------
@@ -266,20 +316,23 @@ class BMOClient:
         except (KeyError, TypeError, ValueError) as e:
             raise BadResponse("malformed forget response", status=r.status_code) from e
 
-    def delete_memory(self, memory_id: int) -> bool | None:
-        r = self._short("DELETE", f"/v1/bmo/memories/{int(memory_id)}", ok=(404,))
+    def delete_memory(self, key: str | int) -> bool | None:
+        """Delete one memory: a topic name (v2 server) or a numeric id (v1).
+        None = no memory routes or no such memory (both 404)."""
+        r = self._short("DELETE", f"/v1/bmo/memories/{quote(str(key), safe='')}", ok=(404,))
         return None if r.status_code == 404 else True
 
-    def consolidate_memories(self, session_id: str, messages: list[dict], reason: str,
-                             started_at: str, ended_at: str) -> dict | None:
-        """Hand a finished session to the server for long-term memory. None = no such route."""
-        r = self._short("POST", "/v1/bmo/memories/consolidate", ok=(404,), json={
-            "session_id": session_id, "reason": reason, "messages": messages,
-            "started_at": started_at, "ended_at": ended_at})
-        if r.status_code == 404:
+    def end_session(self, session_id: str) -> bool | None:
+        """End a conversation so the server consolidates its logged turns into long-term
+        memory. True/False = ended/had no logged turns; None = memory is off (404) or the
+        server predates sessions (v1 saves memories every turn instead)."""
+        # v1: 403 "not authorized for this route", or 405 when /memories/{id} catches it.
+        r = self._short("POST", "/v1/bmo/session/end", ok=(403, 404, 405),
+                        headers={"X-Session-ID": session_id})
+        if r.status_code in (403, 404, 405):
             return None
         body = self._json(r)
-        return body if isinstance(body, dict) else {}
+        return bool(body.get("ended")) if isinstance(body, dict) else False
 
     def transcribe(self, audio_path: str, request_id: str | None = None) -> str:
         rid = request_id or self.new_request_id()

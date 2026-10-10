@@ -14,7 +14,6 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -71,10 +70,6 @@ def is_goodbye(text: str) -> bool:
         while words and words[-1] in _GOODBYE_FILLER and " ".join(words) not in _GOODBYE_PHRASES:
             words = words[:-1]
     return bool(words) and " ".join(words) in _GOODBYE_PHRASES
-
-
-def iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
 
 
 def write_json_atomic(path: Path, data, prefix: str = ".tmp-") -> bool:

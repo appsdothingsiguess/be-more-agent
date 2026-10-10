@@ -174,10 +174,11 @@ def test_interact_history_and_memory_fields(client, server):
 
 
 def test_memory_routes(client, server):
-    assert client.list_memories(limit=5, offset=2)[0]["content"] == "likes tea"
+    assert client.list_memories(limit=5, offset=2)[0]["name"] == "likes-tea"
     assert server.requests[-1]["query"] == "limit=5&offset=2"
-    assert client.delete_memory(1) is True
-    assert client.delete_memory(1) is None
+    assert client.delete_memory("likes-tea") is True
+    assert server.requests[-1]["path"] == "/v1/bmo/memories/likes-tea"
+    assert client.delete_memory("likes-tea") is None
     assert client.forget_memories() == 0
 
 
@@ -185,7 +186,7 @@ def test_memory_routes_404_means_unavailable(client, server):
     server.memory_routes = False
     assert client.list_memories() is None
     assert client.forget_memories() is None
-    assert client.delete_memory(3) is None
+    assert client.delete_memory("x") is None
 
 
 def test_memory_routes_other_errors_raise(client, server):
@@ -214,24 +215,46 @@ def test_all_server_emotions_exist_as_faces():
     assert EMOTIONS - {"neutral"} <= set(faces) and set(emotion_names(faces)) <= EMOTIONS
 
 
-def test_consolidate_memories(client, server):
-    msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
-    out = client.consolidate_memories("abc", msgs, "idle", "2026-01-01T00:00:00+00:00",
-                                      "2026-01-01T00:05:00+00:00")
-    assert out == {"accepted": True, "stored": 2}
+def test_end_session(client, server):
+    assert client.end_session("abc") is True
     rec = server.requests[-1]
-    assert rec["method"] == "POST" and rec["path"] == "/v1/bmo/memories/consolidate"
-    assert rec["json"] == {"session_id": "abc", "reason": "idle", "messages": msgs,
-                           "started_at": "2026-01-01T00:00:00+00:00",
-                           "ended_at": "2026-01-01T00:05:00+00:00"}
-    server.consolidate_status = 202
-    assert client.consolidate_memories("abc", msgs, "idle", "a", "b")["accepted"] is True
+    assert rec["method"] == "POST" and rec["path"] == "/v1/bmo/session/end"
+    assert rec["headers"]["x-session-id"] == "abc" and rec["headers"]["authorization"]
+    assert client.session_id == "sess-1"          # only this request used the other id
+    server.session_ended = False
+    assert client.end_session("abc") is False
 
 
-def test_consolidate_memories_404_and_errors(client, server):
+def test_end_session_404_and_errors(client, server):
     server.memory_routes = False
-    assert client.consolidate_memories("abc", [], "idle", "a", "b") is None
+    assert client.end_session("abc") is None
     server.memory_routes = True
+    for code in (403, 405):                       # v1 server: no session route for BMO
+        server.session_end_status = code
+        assert client.end_session("abc") is None
+    server.session_end_status = 200
     server.auth_mode_401 = True
     with pytest.raises(AuthError):
-        client.consolidate_memories("abc", [], "idle", "a", "b")
+        client.end_session("abc")
+
+
+def test_actions_and_statuses_are_parsed(server, client):
+    import base64
+    wav = base64.b64encode(b"RIFFcoin").decode()
+    server.interact_extra = {
+        "actions": [{"type": "expression", "name": "dance"},
+                    {"type": "sound", "name": "coin", "audio_wav_base64": wav},
+                    {"type": "sound", "name": "broken", "audio_wav_base64": "!!"},
+                    {"type": "sound", "name": "silent"},
+                    {"type": "teleport", "name": "x"}, {"type": "expression"}, "junk"],
+        "statuses": ["Searching memories...", {"text": "Thinking"}, "", 3]}
+    r = client.interact(text="hi")
+    assert [(a.type, a.name) for a in r.actions] == [("expression", "dance"), ("sound", "coin")]
+    assert r.actions[1].audio_wav == b"RIFFcoin"
+    assert r.statuses == ("Searching memories...", "Thinking")
+    assert "audio_wav_base64" not in r.raw["actions"][1]
+
+
+def test_older_server_has_no_actions(client):
+    r = client.interact(text="hi")
+    assert r.actions == () and r.statuses == ()

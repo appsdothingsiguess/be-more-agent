@@ -71,3 +71,24 @@ def test_configure_tolerates_failure_and_can_be_disabled(tmp_path):
     Speaker(SpeakerConfig(set_volume=False), tmp_path, cards=CARDS,
             run=lambda a, **k: calls.append(a)).configure()
     assert calls == []
+
+
+def test_replugged_speaker_is_redetected_and_volume_reapplied(tmp_path):
+    cards, argvs, mixer = [], [], []
+
+    def popen(argv, **kw):
+        argvs.append(argv)
+        return subprocess.Popen(["true"])
+
+    def run(cmd, **kw):
+        mixer.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    sp = Speaker(SpeakerConfig(), tmp_path, popen=popen, cards=cards, run=run)
+    assert sp.resolved.source == "fallback"  # started while unplugged
+    cards.append(Card(3, "UACDemoV10", "UACDemoV1.0", "Jieli UACDemoV1.0"))  # plugged in as card 3
+    sp.play("a.wav")
+    assert argvs[-1][3] == "plughw:CARD=UACDemoV10,DEV=0"
+    assert sp.card == "UACDemoV10" and mixer[-1][:3] == ["amixer", "-c", "UACDemoV10"]
+    sp.play("b.wav")
+    assert len(mixer) == 1  # unchanged device: no extra mixer calls

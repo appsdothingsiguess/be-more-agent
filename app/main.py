@@ -61,6 +61,7 @@ def build_live(cfg, mic):
     from app.hardware.stream_mic import StreamMicrophone
 
     capture = AudioCapture(cfg, publish=None)
+    capture.on_device_change = mic.use_device  # replugged mic: redo gain/AGC on the new card
     return capture, StreamMicrophone(cfg, capture, file_mic=mic)
 
 

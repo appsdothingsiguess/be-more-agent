@@ -54,9 +54,11 @@ class FakeBMOServer:
         self.interact_audio_b64: str | None = base64.b64encode(tiny_wav()).decode()
         self.cancel_status = 200
         self.memory_routes = True  # False = the server predates memory (404)
-        self.memories: list[dict] = [{"id": 1, "content": "likes tea", "type": "fact",
-                                      "created_at": "2026-01-01"}]
-        self.consolidate_status = 200
+        self.memories: list[dict] = [{"name": "likes-tea", "content": "Likes tea.",
+                                      "type": "preference", "created_at": "2026-01-01",
+                                      "updated_at": "2026-01-01"}]
+        self.session_ended = True
+        self.session_end_status = 200   # 403 = v1 server: route not allowed for BMO
         self.interact_extra: dict = {}
         self.cancelled = threading.Event()
         self.interact_started = threading.Event()
@@ -166,15 +168,15 @@ class FakeBMOServer:
             if m == "DELETE":
                 n, self.memories = len(self.memories), []
                 return 200, {"forgotten": n}, None
-        if p == "/v1/bmo/memories/consolidate" and m == "POST" and self.memory_routes:
-            return self.consolidate_status, {"accepted": True, "stored": 2}, None
-        mem = re.fullmatch(r"/v1/bmo/memories/(\d+)", p)
+        if p == "/v1/bmo/session/end" and m == "POST" and self.memory_routes:
+            return self.session_end_status, {"ended": self.session_ended}, None
+        mem = re.fullmatch(r"/v1/bmo/memories/([^/]+)", p)
         if mem and m == "DELETE" and self.memory_routes:
-            keep = [x for x in self.memories if x["id"] != int(mem.group(1))]
+            keep = [x for x in self.memories if x["name"] != mem.group(1)]
             if len(keep) == len(self.memories):
-                return 404, {"error": "unknown id"}, None
+                return 404, {"error": "unknown topic"}, None
             self.memories = keep
-            return 200, {"deleted": True}, None
+            return 200, {"forgotten": 1}, None
         mm = re.fullmatch(r"/v1/requests/([^/]+)/cancel", p)
         if mm and m == "POST":
             if 200 <= self.cancel_status < 300:

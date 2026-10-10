@@ -319,3 +319,33 @@ def test_emotion_list_for_the_server(faces):
     assert {"neutral", "happy", "excited", "sad", "angry", "kiss", "dizzy", "chewing"} <= set(names)
     assert not any(n.startswith("mouth_") or n in ("blink", "error", "listening") for n in names)
     assert all(face_svg.parse_svg((SVG_DIR / p.name).read_text()) for p in SVG_DIR.glob("2[4-7]*.svg"))
+
+
+def test_moves_shift_the_face_and_end(faces):
+    a = face.FaceAnimator(faces, random.Random(5))
+    a.set_state(BotState.SPEAKING, 0)
+    assert a.play_expression("Dance", 0.0)
+    run(a, 0.0, 0.5)
+    dx, dy = a.offsets()["mouth"]
+    assert abs(dx) + abs(dy) > 1
+    run(a, 0.5, face.MOVES["dance"])
+    assert a._move is None and a.offsets()["mouth"] == (0.0, 0.0)
+
+
+def test_wink_closes_one_eye(faces):
+    a = face.FaceAnimator(faces, random.Random(5))
+    a.set_state(BotState.IDLE, 0)
+    assert a.play_expression("wink", 0.0)
+    a._next_blink = 99
+    run(a, 0.0, 0.2)
+    assert a._target_key[3] is True
+    assert a.target.parts["eye-right"][0].pts == faces["blink"].parts["eye-right"][0].pts
+    assert a.target.parts["eye-left"][0].pts != faces["blink"].parts["eye-left"][0].pts
+
+
+def test_expression_action_face_names_and_unknowns(faces):
+    a = face.FaceAnimator(faces, random.Random(5))
+    a.set_state(BotState.IDLE, 0)
+    assert a.play_expression("kiss", 0.0) and a.emotion == "kiss"
+    assert not a.play_expression("moonwalk", 0.0)
+    assert not a.play_expression("mouth_open", 0.0)

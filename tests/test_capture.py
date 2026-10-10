@@ -126,3 +126,26 @@ def test_attach_skips_preroll_once_after_wake():
     cap.skip_preroll = True
     assert cap.attach(lambda f: None) == []      # wake phrase left out of the clip
     assert len(cap.attach(lambda f: None)) == 1  # next attach gets the preroll again
+
+
+def test_mic_plugged_in_after_start_is_redetected():
+    cards, changed = [], []
+    cfg = Config()
+    cfg.microphone.gain_db = 0.0
+    cmds, queue = [], [b"", pcm(5, 2)]
+
+    def popen(cmd, **k):
+        cmds.append(cmd)
+        if len(cmds) == 1:
+            cards.extend(CARDS)  # the mic appears while the first attempt fails
+        return FakeProc(queue.pop(0) if queue else b"")
+    cap = AudioCapture(cfg, popen=popen, cards=cards, backoff=(0.01, 0.02))
+    cap.on_device_change = changed.append
+    got = []
+    cap.add_sink(got.append)
+    cap.start()
+    assert wait_for(lambda: got)
+    cap.stop()
+    assert cmds[0][cmds[0].index("-D") + 1] == cfg.microphone.fallback_device
+    assert cmds[1][cmds[1].index("-D") + 1] == "plughw:CARD=Device,DEV=0"
+    assert [r.device for r in changed] == ["plughw:CARD=Device,DEV=0"]

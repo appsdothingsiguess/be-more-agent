@@ -23,7 +23,7 @@ Event feed (dicts passed to subscribers, each also carries "time"). Schema:
   session    {id, reason, consolidated}           a conversation session ended and a fresh one
                started (id = the NEW session). reason: new_session|idle|startup.
                consolidated: ok (saved to long-term memory) | pending (server unreachable,
-               kept on disk and retried) | unavailable (server has no consolidate route) |
+               kept on disk and retried) | unavailable (long-term memory is off on the server) |
                skipped (memory off or nothing said). Clients should clear their chat view.
 ``history`` (replayed to new clients) holds only text and error events;
 ``snapshot()`` returns the sticky last phase and live events.
@@ -46,7 +46,7 @@ from app.config import Config
 from app.hardware.camera import CameraError
 from app.hardware.input import Action
 from app.memory import (ConversationMemory, ConversationSession, is_forget_command,
-                        is_goodbye, is_new_session_command, iso, write_json_atomic)
+                        is_goodbye, is_new_session_command, write_json_atomic)
 from app.replies import ReplyStore
 from app.notify import ERRORS, NOTICES, SERVER_CODES, SOFT, clip_path
 from app.server.errors import (AuthError, BadResponse, BMOError, RequestCancelled,
@@ -123,6 +123,9 @@ class InteractionController:
                                          cfg.memory.max_messages, cfg.memory.max_chars)
         self._memory_epoch = 0  # bumped by every clear; a turn started before one is not stored
         self.session = ConversationSession(cfg.runtime_path / "session.json")
+        # The server logs memory-on turns under X-Session-ID and consolidates them when the
+        # session ends, so the client always sends this session's id.
+        self.client.session_id = self.session.id
         self.pending_dir = cfg.runtime_path / "pending_sessions"
         self.session_poll = SESSION_POLL        # tests may shorten it
         self._session_lock = threading.Lock()   # snapshot + reset of the session
@@ -369,7 +372,7 @@ class InteractionController:
             with self._session_lock:
                 snap = self.session.to_dict()
                 snap["ended_at"] = self.session._clock()
-                out["id"] = self.session.reset()
+                out["id"] = self._reset_session()
                 self._clear_memory()
             self.history.clear()
             if self.cfg.memory.enabled and snap["messages"]:
@@ -382,15 +385,17 @@ class InteractionController:
                       "reason": reason, "consolidated": out["consolidated"]})
         return out
 
-    @staticmethod
-    def _payload(snap: dict, reason: str) -> dict:
-        return {"session_id": snap["id"], "reason": reason, "messages": snap["messages"],
-                "started_at": iso(snap["started_at"]), "ended_at": iso(snap["ended_at"])}
+    def _reset_session(self) -> str:
+        """Start a new session (caller holds _session_lock); later turns are logged under it."""
+        sid = self.session.reset()
+        self.client.session_id = sid
+        return sid
 
     def _consolidate(self, snap: dict, reason: str) -> str:
-        payload = self._payload(snap, reason)
+        """Ask the server to end the session; it consolidates the turns it logged."""
+        payload = {"session_id": snap["id"], "reason": reason}
         try:
-            res = self.client.consolidate_memories(**payload)
+            res = self.client.end_session(snap["id"])
         except Exception as e:
             log.warning("Consolidating session %s failed, keeping it for later: %s", snap["id"], e)
             self._save_pending(payload)
@@ -419,15 +424,15 @@ class InteractionController:
             for f in self._pending_files():
                 try:
                     payload = json.loads(f.read_text())
-                    res = self.client.consolidate_memories(**payload)
-                except (OSError, ValueError, TypeError):
+                    res = self.client.end_session(str(payload["session_id"]))
+                except (OSError, ValueError, TypeError, KeyError):
                     f.unlink(missing_ok=True)      # unreadable: nothing to retry
                     continue
                 except Exception as e:
                     log.info("Pending session retry failed: %s", e)
                     break
                 if res is None:
-                    break                          # server has no route; keep them
+                    break                          # memory is off on the server; keep them
                 f.unlink(missing_ok=True)
                 sent += 1
         return sent
@@ -568,7 +573,7 @@ class InteractionController:
         try:
             self._clear_memory()
             with self._session_lock:
-                self.session.reset()
+                self._reset_session()
             self._discard_pending()
         except Exception:
             log.exception("Clearing local memory failed")
@@ -593,11 +598,11 @@ class InteractionController:
             return {"available": False, "memories": [], "error": None}
         return {"available": True, "memories": memories, "error": None}
 
-    def delete_memory(self, memory_id: int) -> dict:
+    def delete_memory(self, name: str | int) -> dict:
         try:
-            ok = self.client.delete_memory(memory_id)
+            ok = self.client.delete_memory(name)
         except Exception as e:
-            log.warning("Deleting memory %s failed: %s", memory_id, e)
+            log.warning("Deleting memory %s failed: %s", name, e)
             return {"available": True, "deleted": False}
         if ok is None:
             return {"available": False, "deleted": False}
@@ -754,6 +759,22 @@ class InteractionController:
             threading.Thread(target=self.end_session, args=("goodbye",),
                              name="bmo-session", daemon=True).start()
 
+    def _run_actions(self, actions, turn: Turn, gen: int) -> bool:
+        """Do BMO's actions in order, before the spoken reply: expressions start an
+        animation (it keeps going while later sounds and the speech play), sounds play
+        to the end on the Pi speaker. False if the turn was interrupted meanwhile."""
+        sfx_dir = self.cfg.runtime_path / "sfx"
+        for i, action in enumerate(actions):
+            if action.type == "expression":
+                play = getattr(self.ui, "play_expression", None)
+                if play is not None:
+                    play(action.name)
+            elif action.type == "sound" and turn.play_on_pi and not self.cfg.ui.text_only:
+                self.speaker.play_bytes(action.audio_wav, sfx_dir / f"sfx-{i}.wav", block=True)
+            if self._stale(gen):
+                return False
+        return True
+
     @staticmethod
     def _wav_duration(data: bytes) -> float | None:
         try:
@@ -831,7 +852,9 @@ class InteractionController:
                 log.info("Dropping response for interrupted request %s", request_id)
                 return
             self.reservation.renewed()
-            end_session = bool(result.transcript) and is_new_session_command(result.transcript)
+            raw = getattr(result, "raw", None) or {}
+            end_session = bool(raw.get("session_reset")) or (
+                bool(result.transcript) and is_new_session_command(result.transcript))
             turn.goodbye = not end_session and is_goodbye(result.transcript or text or "")
             if not end_session:
                 self._remember(result, text, use_memory, epoch)
@@ -847,6 +870,10 @@ class InteractionController:
             set_emotion = getattr(self.ui, "set_emotion", None)
             if set_emotion is not None:
                 set_emotion(result.emotion)     # the face keeps it while BMO talks
+            for status in getattr(result, "statuses", ()):
+                log.info("BMO status: %s", status)
+            if not self._run_actions(getattr(result, "actions", ()), turn, gen):
+                return
 
             reply = None
             if result.audio_wav:

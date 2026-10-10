@@ -32,6 +32,7 @@ class AudioCapture:
         mic = cfg.microphone
         self.rate = int(mic.stream_rate)
         self.frame_s = FRAME_SAMPLES / self.rate
+        self._cards = cards
         self.device = alsa.resolve_device(mic.device, mic.match, mic.fallback_device, cards).device
         n = max(1, int(round(cfg.listen.preroll_seconds / self.frame_s)))
         self._preroll: deque[np.ndarray] = deque(maxlen=n)
@@ -43,6 +44,8 @@ class AudioCapture:
         self._proc = None
         self.error: str | None = None
         self.on_recover: Callable[[], None] | None = None  # called when frames flow again
+        # called with the new alsa.ResolvedDevice when the mic shows up under another name
+        self.on_device_change: Callable[[object], None] | None = None
 
     # -- sinks / preroll ---------------------------------------------------
     def add_sink(self, fn: Callable[[np.ndarray], None]) -> None:
@@ -130,6 +133,7 @@ class AudioCapture:
         delay = self._backoff[0]
         while not self._stop.is_set():
             got_frames = False
+            self._refresh_device()
             try:
                 self._proc = self._popen(self.command(), stdout=subprocess.PIPE,
                                          stderr=subprocess.DEVNULL, bufsize=0)
@@ -156,6 +160,26 @@ class AudioCapture:
             if self._stop.wait(delay):
                 break
             delay = min(delay * 2, self._backoff[1])
+
+    def _refresh_device(self) -> None:
+        """Re-detect the USB mic so an unplug/replug (or a late boot) recovers by itself."""
+        mic = self.cfg.microphone
+        if mic.device != "auto":
+            return
+        try:
+            r = alsa.resolve_device(mic.device, mic.match, mic.fallback_device, self._cards)
+        except Exception as e:
+            log.warning("Microphone detection failed: %s", e)
+            return
+        if r.device == self.device:
+            return
+        log.info("Microphone device changed: %s -> %s", self.device, r.device)
+        self.device = r.device
+        if self.on_device_change:
+            try:
+                self.on_device_change(r)
+            except Exception:
+                log.exception("capture device-change callback failed")
 
     def _dispatch(self, samples: np.ndarray) -> None:
         db = float(self.cfg.microphone.gain_db)

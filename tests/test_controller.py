@@ -1,3 +1,4 @@
+import json
 import os
 import threading
 from pathlib import Path
@@ -40,8 +41,11 @@ class FakeClient:
         self.calls = []
         self.error = None
         self.raw = {}
+        self.actions = ()
         self.consolidated = []
-        self.consolidate_result = {"accepted": True}
+        self.consolidate_result = True
+        self.session_id = None
+        self.turn_sessions = []   # X-Session-ID each interact was sent under
         self.consolidate_error = None
 
     def health(self):
@@ -53,6 +57,7 @@ class FakeClient:
 
     def interact(self, **kw):
         self.calls.append(kw)
+        self.turn_sessions.append(self.session_id)
         self.log.append(("interact", kw["request_id"]))
         self.entered.set()
         if self.block is not None:
@@ -61,17 +66,16 @@ class FakeClient:
             raise self.error
         return SimpleNamespace(transcript="hi bmo", text=f"reply to {kw['request_id']}",
                                audio_wav=WAV, request_id=kw["request_id"],
-                               raw=self.raw)
+                               raw=self.raw, actions=self.actions)
 
     def forget_memories(self):
         self.log.append(("forget_memories",))
         return 3
 
-    def consolidate_memories(self, session_id, messages, reason, started_at, ended_at):
+    def end_session(self, session_id):
         if self.consolidate_error:
             raise self.consolidate_error
-        self.consolidated.append({"session_id": session_id, "messages": messages, "reason": reason,
-                                  "started_at": started_at, "ended_at": ended_at})
+        self.consolidated.append({"session_id": session_id})
         return self.consolidate_result
 
     def cancel(self, request_id):
@@ -132,6 +136,11 @@ class FakeSpeaker:
             self._stop.wait(5)
             return False
         return True
+
+    def play_bytes(self, data, path, block=True):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(data)
+        return self.play(path, block=block)
 
     def configure(self):
         self.log.append(("speaker_configure",))
@@ -521,9 +530,9 @@ def test_public_memory_api_never_raises(rig):
     rig.client.delete_memory = boom
     assert rig.ctl.list_memories()["error"] == "AuthError"
     assert rig.ctl.forget_memory()["server"] == "error"
-    assert rig.ctl.delete_memory(1) == {"available": True, "deleted": False}
+    assert rig.ctl.delete_memory("likes-tea") == {"available": True, "deleted": False}
     rig.client.delete_memory = lambda i: None
-    assert rig.ctl.delete_memory(1) == {"available": False, "deleted": False}
+    assert rig.ctl.delete_memory("likes-tea") == {"available": False, "deleted": False}
     rig.client.forget_memories = lambda: None
     assert rig.ctl.forget_memory()["server"] == "unavailable"
 
@@ -881,10 +890,10 @@ def test_new_session_consolidates_and_resets(rig):
     old = rig.ctl.session.id
     got = events_of(rig)
     out = rig.ctl.new_session()
-    c = rig.client.consolidated[0]
-    assert c["session_id"] == old and c["reason"] == "new_session" and len(c["messages"]) == 4
-    assert c["started_at"].endswith("+00:00") and c["ended_at"].endswith("+00:00")
+    assert rig.client.consolidated == [{"session_id": old}]
+    assert rig.client.turn_sessions == [old, old]     # the server logged both turns under it
     assert out["consolidated"] == "ok" and out["id"] == rig.ctl.session.id != old
+    assert rig.client.session_id == out["id"]         # later turns go to the new session
     assert got[0]["id"] == out["id"] and got[0]["reason"] == "new_session"
     assert got[0]["consolidated"] == "ok"
     assert rig.ctl.conversation() == [] and rig.ctl.session.is_empty
@@ -964,7 +973,7 @@ def test_idle_trigger(rig):
     assert rig.ctl._idle_tick() is False
     clock[0] += 2
     assert rig.ctl._idle_tick() is True
-    assert rig.client.consolidated[0]["reason"] == "idle" and rig.ctl.session.is_empty
+    assert rig.client.consolidated and rig.ctl.session.is_empty
 
 
 def test_idle_disabled_busy_and_empty(rig):
@@ -991,7 +1000,7 @@ def test_idle_thread_runs(rig):
     rig.ctl.session.last_activity = rig.ctl.session.last_activity - 3600
     rig.ctl._start_session_thread()
     wait_for(lambda: rig.client.consolidated)
-    assert rig.client.consolidated and rig.client.consolidated[0]["reason"] == "idle"
+    assert rig.client.consolidated
     rig.ctl.shutdown()
 
 
@@ -1011,7 +1020,7 @@ def test_startup_consolidates_stale_leftover(tmp_path):
     assert ctl.session.id == old
     ctl.start()
     wait_for(lambda: client.consolidated)
-    assert client.consolidated[0]["session_id"] == old and client.consolidated[0]["reason"] == "startup"
+    assert client.consolidated[0]["session_id"] == old
     assert ctl.session.id != old
     ctl.shutdown()
 
@@ -1034,6 +1043,7 @@ def test_forget_clears_session_and_pending(rig):
     assert list(rig.ctl.pending_dir.glob("*.json"))
     rig.ctl.forget_memory()
     assert rig.ctl.session.is_empty and rig.ctl.session.id != old
+    assert rig.client.session_id == rig.ctl.session.id
     assert not list(rig.ctl.pending_dir.glob("*.json"))
 
 
@@ -1061,8 +1071,26 @@ def test_spoken_new_session_command(rig):
     wait_for(lambda: got)
     assert got and got[0]["reason"] == "new_session"
     assert rig.client.consolidated[0]["session_id"] == old
-    assert len(rig.client.consolidated[0]["messages"]) == 2     # the command was not stored
     assert rig.ctl.conversation() == []
+
+
+def test_server_session_reset_starts_new_session(rig):
+    run_text(rig, "earlier")
+    old = rig.ctl.session.id
+    rig.client.raw = {"session_reset": True}       # the server matched a phrase the Pi didn't
+    got = events_of(rig)
+    run_text(rig, "let's begin again")
+    wait_for(lambda: got)
+    assert got[0]["reason"] == "new_session" and rig.ctl.session.id != old
+    assert rig.client.consolidated[0]["session_id"] == old
+
+
+def test_old_pending_files_are_retried_by_session_id(rig):
+    rig.ctl.pending_dir.mkdir(parents=True, exist_ok=True)
+    (rig.ctl.pending_dir / "legacy.json").write_text(json.dumps(
+        {"session_id": "legacy", "reason": "idle", "messages": [], "started_at": "a"}))
+    assert rig.ctl._retry_pending() == 1
+    assert rig.client.consolidated == [{"session_id": "legacy"}]
 
 
 def test_goodbye_ends_session_without_followup(rig):
@@ -1082,7 +1110,7 @@ def test_goodbye_ends_session_without_followup(rig):
     assert done[-1]["goodbye"] is True
     assert got[0]["reason"] == "goodbye"
     assert rig.client.consolidated[0]["session_id"] == old
-    assert len(rig.client.consolidated[0]["messages"]) == 4     # the farewell is part of the session
+    assert rig.client.turn_sessions[-1] == old              # the farewell is part of the session
 
 
 def test_normal_turn_is_not_goodbye(rig):
@@ -1090,3 +1118,24 @@ def test_normal_turn_is_not_goodbye(rig):
     rig.ctl.subscribe(lambda e: done.append(e) if e["type"] == "turn_done" else None)
     run_text(rig, "what is a goodbye in french")
     assert done[-1]["goodbye"] is False and not rig.client.consolidated
+
+
+def test_actions_run_in_order_before_the_reply(rig):
+    from app.server.client import Action
+    rig.ui.play_expression = lambda name: rig.log.append(("expression", name))
+    rig.client.actions = (Action("expression", "dance"), Action("sound", "coin", b"COIN"),
+                          Action("expression", "wink"))
+    run_text(rig)
+    seq = [e for e in rig.log if e[0] in ("expression", "play")]
+    assert seq[:3] == [("expression", "dance"), ("play", "sfx-1.wav"), ("expression", "wink")]
+    assert seq[3][0] == "play" and seq[3][1] != "sfx-1.wav"      # then the spoken reply
+    assert rig.spk.played[0].read_bytes() == b"COIN"
+    assert rig.spk.played[-1].read_bytes() == WAV
+
+
+def test_action_sounds_muted_in_text_only(rig):
+    from app.server.client import Action
+    rig.cfg.ui.text_only = True
+    rig.client.actions = (Action("sound", "coin", b"COIN"),)
+    run_text(rig)
+    assert rig.spk.played == []

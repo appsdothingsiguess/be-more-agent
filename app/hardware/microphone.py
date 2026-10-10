@@ -21,6 +21,7 @@ class Microphone:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self._run = run
         self._popen = popen
+        self._cards = cards
         self.resolved = alsa.resolve_device(cfg.device, cfg.match, cfg.fallback_device, cards)
         self.card = cfg.alsa_card if cfg.alsa_card is not None else self.resolved.card
         self.raw_path = self.runtime_dir / "mic_raw.wav"
@@ -45,6 +46,26 @@ class Microphone:
         if self.cfg.auto_gain_control:
             self._amixer("Auto Gain Control", "on")
 
+    def use_device(self, r: "alsa.ResolvedDevice") -> None:
+        """Switch to a newly detected card and redo the mixer (a replugged mic boots quiet)."""
+        if r.device == self.resolved.device:
+            return
+        log.info("Microphone device changed: %s -> %s", self.resolved.device, r.device)
+        self.resolved = r
+        if self.cfg.alsa_card is None:
+            self.card = r.card
+        if r.source == "match":
+            self.configure()
+
+    def refresh(self) -> None:
+        if self.cfg.device != "auto":
+            return
+        try:
+            self.use_device(alsa.resolve_device(self.cfg.device, self.cfg.match,
+                                                self.cfg.fallback_device, self._cards))
+        except Exception as e:
+            log.warning("Microphone detection failed: %s", e)
+
     @property
     def is_recording(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -52,6 +73,7 @@ class Microphone:
     def start(self) -> None:
         if self.is_recording:
             raise RuntimeError("already recording")
+        self.refresh()
         self.raw_path.unlink(missing_ok=True)
         self.upload_path.unlink(missing_ok=True)
         cmd = [

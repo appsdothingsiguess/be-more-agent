@@ -16,6 +16,8 @@ log = logging.getLogger(__name__)
 SPEAK_FRAME_MS = 50
 FRAME_MS = 500
 SVG_FRAME_MS = 33
+# The touch panel sends stray short taps; only a deliberate hold toggles the text box.
+LONG_PRESS_MS = 1000
 
 
 def load_face_frames(faces_dir: Path) -> dict[BotState, list[Path]]:
@@ -68,17 +70,20 @@ class TkUI:
             self.w, self.h = cfg.width, cfg.height
             self.root.geometry(f"{self.w}x{self.h}")
 
+        self._press_job = None
         self.animator = self._load_animator(svg_dir)
         self._face_items: list = []
         self.canvas = self.background_label = None
         if self.animator is not None:
             self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0, bd=0)
             self.canvas.place(x=0, y=0, relwidth=1, relheight=1)
-            self.canvas.bind("<Button-1>", self.toggle_hud_visibility)
+            self.canvas.bind("<ButtonPress-1>", self._on_press)
+            self.canvas.bind("<ButtonRelease-1>", self._on_release)
         else:
             self.background_label = tk.Label(self.root, bg="black")
             self.background_label.place(x=0, y=0, relwidth=1, relheight=1)
-            self.background_label.bind("<Button-1>", self.toggle_hud_visibility)
+            self.background_label.bind("<ButtonPress-1>", self._on_press)
+            self.background_label.bind("<ButtonRelease-1>", self._on_release)
 
         self.response_text = tk.Text(
             self.root, height=6, width=60, wrap=tk.WORD, state=tk.DISABLED,
@@ -179,6 +184,19 @@ class TkUI:
         self.root.after(SPEAK_FRAME_MS if self.state == BotState.SPEAKING else FRAME_MS,
                         self._update_animation)
 
+    def _on_press(self, event=None) -> None:
+        self._on_release()
+        self._press_job = self.root.after(LONG_PRESS_MS, self._on_long_press)
+
+    def _on_release(self, event=None) -> None:
+        if self._press_job is not None:
+            self.root.after_cancel(self._press_job)
+            self._press_job = None
+
+    def _on_long_press(self) -> None:
+        self._press_job = None
+        self.toggle_hud_visibility()
+
     def toggle_hud_visibility(self, event=None) -> None:
         try:
             if self.response_text.winfo_ismapped():
@@ -232,6 +250,14 @@ class TkUI:
         """Show an emotion ('happy', 'sad', ...) on the idle/speaking face for a few seconds."""
         if self.animator is not None:
             self._post(lambda: self.animator.set_emotion(name, time.monotonic()))
+
+    def play_expression(self, name: str) -> None:
+        """Run a server expression action (dance, wink, or a face name) on the SVG face."""
+        def _update():
+            if not self.animator.play_expression(name, time.monotonic()):
+                log.info("No expression %r on this face set", name)
+        if self.animator is not None:
+            self._post(_update)
 
     def show_text(self, text: str, who: str = "bmo") -> None:
         def _update():

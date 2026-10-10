@@ -232,10 +232,11 @@ class MemController(FakeController):
 
     def list_memories(self):
         return {"available": True, "error": None, "memories": [
-            {"id": 1, "content": "likes tea", "type": "fact", "created_at": "x"}]}
+            {"name": "likes-tea", "content": "Likes tea.", "type": "preference",
+             "created_at": "x", "updated_at": "x"}]}
 
-    def delete_memory(self, memory_id):
-        self.deleted.append(memory_id)
+    def delete_memory(self, name):
+        self.deleted.append(name)
         return {"available": True, "deleted": True}
 
     def conversation(self):
@@ -261,7 +262,7 @@ def test_memory_requires_login(memweb):
 
 def test_memory_get(memweb, sess):
     d = sess.get(memweb.base + "/api/memories").json()
-    assert d["long_term"]["memories"][0]["content"] == "likes tea"
+    assert d["long_term"]["memories"][0]["content"] == "Likes tea."
     assert d["conversation"] == [{"role": "user", "content": "hi"}]
 
 
@@ -273,18 +274,21 @@ def test_memory_forget(memweb, sess):
 
 
 def test_memory_delete_validation(memweb, sess):
-    for body in ({}, {"id": "3"}, {"id": True}, {"id": 0}, {"id": -1}, {"id": 1.5}):
+    for body in ({}, {"id": "a b"}, {"id": True}, {"id": 0}, {"name": 3}, {"name": ""}, {"name": "Likes-Tea"},
+                 {"name": "likes tea"}, {"name": "../x"}, {"name": "-x"}, {"name": "a" * 41}):
         r = sess.post(memweb.base + "/api/memories/delete", json=body)
         assert r.status_code == 400, body
     assert memweb.ctrl.deleted == []
-    r = sess.post(memweb.base + "/api/memories/delete", json={"id": 7})
+    r = sess.post(memweb.base + "/api/memories/delete", json={"name": "likes-tea"})
     assert r.status_code == 200 and r.json() == {"available": True, "deleted": True}
-    assert memweb.ctrl.deleted == [7]
+    assert memweb.ctrl.deleted == ["likes-tea"]
+    r = sess.post(memweb.base + "/api/memories/delete", json={"id": 7})    # v1 server
+    assert r.status_code == 200 and memweb.ctrl.deleted == ["likes-tea", 7]
 
 
 def test_memory_unsupported(web, sess):
     assert sess.get(web.base + "/api/memories").status_code == 501
-    for p, body in (("forget", {}), ("delete", {"id": 1})):
+    for p, body in (("forget", {}), ("delete", {"name": "x"})):
         r = sess.post(web.base + "/api/memories/" + p, json=body)
         assert r.status_code == 501 and r.json() == {"error": "memory not supported"}
 
