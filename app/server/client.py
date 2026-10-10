@@ -367,7 +367,8 @@ class BMOClient:
         streamed: list[Action] = []
         pieces: dict[int, bytes] = {}
         try:
-            for line in r.iter_lines(decode_unicode=True):
+            # Big reads: a song reply is one multi-MB line, and 512-byte reads take seconds.
+            for line in r.iter_lines(chunk_size=65536, decode_unicode=True):
                 if not line or not line.startswith("data:"):
                     continue
                 try:
