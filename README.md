@@ -67,7 +67,7 @@ Edit `config.json` (copied from `config.example.json`). Any subset of keys overr
 | Key | Default | Meaning |
 |---|---|---|
 | `server_url` | `http://192.168.0.240:8765` | Home server |
-| `audio_stream` | `true` | Play the reply audio in pieces while the server is still making it (speech starts sooner, songs play without gaps); `false` waits for the whole WAV |
+| `audio_stream` | `false` | Play the reply audio in pieces while the server is still making it (speech starts sooner, songs play without gaps); `false` waits for the whole WAV. The env var `BMO_AUDIO_STREAM=1` (or `0`) overrides it. Each turn logs `Turn audio: asked=... got=...` and when its audio started |
 | `token_file` | `/etc/bmo/token` | Credential file |
 | `model` | `bmo-qwen3-vl-8b` | Server model name |
 | `microphone.device` / `.match` / `.fallback_device` | `auto` / `USB PnP Sound Device` / `plughw:1,0` | Mic selection |

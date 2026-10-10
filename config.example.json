@@ -2,7 +2,7 @@
   "server_url": "http://192.168.0.240:8765",
   "token_file": "/etc/bmo/token",
   "model": "bmo-qwen3-vl-8b",
-  "audio_stream": true,
+  "audio_stream": false,
 
   "microphone": {
     "device": "auto",

@@ -1436,6 +1436,7 @@ def _chunks(*pieces, order=None):
 
 def test_streamed_reply_plays_pieces_back_to_back_in_order(rig):
     """audio_stream: the pieces go, in index order, into one open speaker stream."""
+    rig.cfg.audio_stream = True
     pieces = [_wav_piece(0.1, 100), _wav_piece(0.1, 200), _wav_piece(0.1, 300)]
     rig.client.stream = [{"type": "reply", "text": "reply to req-1", "emotion": "happy"},
                          *_chunks(*pieces, order=[1, 0, 2])]
@@ -1512,6 +1513,7 @@ def test_interrupt_stops_a_streamed_reply(rig):
 
 
 def test_no_audio_stream_when_the_pi_does_not_play_it(rig):
+    rig.cfg.audio_stream = True
     rig.ctl.submit_text("hi", speak=True, play_on_pi=False)
     assert rig.client.entered.wait(5) and rig.ctl.wait_idle(5)
     assert "audio_stream" not in rig.client.calls[0]
@@ -1519,3 +1521,19 @@ def test_no_audio_stream_when_the_pi_does_not_play_it(rig):
     rig.client.entered.clear()
     run_text(rig)
     assert "audio_stream" not in rig.client.calls[1]
+
+
+def test_audio_stream_is_off_by_default_and_each_turn_logs_its_mode(rig, caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="app.controller")
+    run_text(rig)
+    assert "audio_stream" not in rig.client.calls[0]
+    assert "Turn audio: asked=whole got=whole" in caplog.text
+    assert "Reply audio starts (audio=whole)" in caplog.text
+    rig.cfg.audio_stream = True
+    rig.client.stream = [{"type": "reply", "text": "hi", "emotion": "happy"},
+                         *_chunks(_wav_piece(0.1, 1))]
+    rig.client.extra = {"audio_streamed": True}
+    run_text(rig)
+    assert "Turn audio: asked=stream got=stream" in caplog.text
+    assert "Reply audio starts (audio=stream)" in caplog.text

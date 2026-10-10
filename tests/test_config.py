@@ -146,3 +146,17 @@ def test_new_sections_validated(tmp_path):
         p.write_text(json.dumps(section))
         with pytest.raises(C.ConfigError):
             C.load_config(p)
+
+
+def test_audio_stream_off_by_default_and_env_switch(monkeypatch, tmp_path):
+    monkeypatch.delenv("BMO_AUDIO_STREAM", raising=False)
+    assert C.load_config(C.APP_ROOT / "config.example.json").audio_stream is False
+    monkeypatch.setenv("BMO_AUDIO_STREAM", "1")
+    assert C.load_config(C.APP_ROOT / "config.example.json").audio_stream is True
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"audio_stream": True}))
+    monkeypatch.setenv("BMO_AUDIO_STREAM", "0")
+    assert C.load_config(p).audio_stream is False      # the env wins over the file
+    monkeypatch.setenv("BMO_AUDIO_STREAM", "maybe")
+    with pytest.raises(C.ConfigError):
+        C.load_config(p)

@@ -195,7 +195,8 @@ class Config:
     reservation_renew_after: float = 240.0
     runtime_dir: str = "runtime"
     # Ask for the reply audio in pieces as it is made, and play them as they come.
-    audio_stream: bool = True
+    # Off by default while it is compared with whole audio; BMO_AUDIO_STREAM=1 turns it on.
+    audio_stream: bool = False
 
     microphone: MicrophoneConfig = field(default_factory=MicrophoneConfig)
     speaker: SpeakerConfig = field(default_factory=SpeakerConfig)
@@ -294,7 +295,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     """Load defaults, overlay JSON from `path` (or config.json if present), then env.
 
     Env overrides: BMO_URL / BMO_SERVER_URL, BMO_MIC_DEVICE, BMO_SPEAKER_DEVICE,
-    BMO_MIC_GAIN_DB (same names as tools/bmo_test.py).
+    BMO_MIC_GAIN_DB (same names as tools/bmo_test.py), BMO_AUDIO_STREAM (1/0).
     """
     cfg = Config()
     explicit = path is not None
@@ -320,6 +321,11 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         cfg.speaker.device = env["BMO_SPEAKER_DEVICE"]
     if env.get("BMO_MIC_GAIN_DB"):
         cfg.microphone.gain_db = float(env["BMO_MIC_GAIN_DB"])
+    flag = env.get("BMO_AUDIO_STREAM", "").strip().lower()
+    if flag:
+        if flag not in ("1", "true", "yes", "on", "0", "false", "no", "off"):
+            raise ConfigError(f"BMO_AUDIO_STREAM: expected 1 or 0, got {flag!r}")
+        cfg.audio_stream = flag in ("1", "true", "yes", "on")
     return validate(cfg)
 
 

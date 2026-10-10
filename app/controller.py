@@ -93,6 +93,7 @@ class Turn:
     reply_stream: "_ReplyStream | None" = None   # reply audio arriving in pieces
     reply_shown: str | None = None  # reply text already shown from the stream
     faced: bool = False             # the reply's face (or singing screen) is queued
+    sent_at: float = 0.0            # monotonic time the request went out
 
 
 class _Lane:
@@ -262,7 +263,8 @@ class _ReplyStream:
         self._out = ctl.speaker.open_stream(fmt[2], fmt[0])
         if self._out is None:
             return
-        log.info("Reply audio starts (streamed)")
+        log.info("Reply audio starts (audio=stream), %.2f s after the request",
+                 time.monotonic() - turn.sent_at)
         with self._cond:
             self._started_at = time.monotonic()
         self._start_music()
@@ -1218,6 +1220,7 @@ class InteractionController:
                 if (self.cfg.audio_stream and speak and turn.play_on_pi
                         and not self.cfg.ui.text_only):
                     extra["audio_stream"] = True    # play the reply as it is made
+                turn.sent_at = time.monotonic()
                 result = self.client.interact(text=text, audio_path=audio, image_path=image,
                                               speak=speak, request_id=request_id,
                                               on_event=self._stream_handler(turn, gen), **extra)
@@ -1230,6 +1233,10 @@ class InteractionController:
                 return
             self.reservation.renewed()
             raw = getattr(result, "raw", None) or {}
+            if speak:
+                log.info("Turn audio: asked=%s got=%s",
+                         "stream" if extra.get("audio_stream") else "whole",
+                         "stream" if getattr(result, "audio_streamed", False) else "whole")
             end_session = bool(raw.get("session_reset")) or (
                 bool(result.transcript) and is_new_session_command(result.transcript))
             turn.goodbye = not end_session and is_goodbye(result.transcript or text or "")
@@ -1284,6 +1291,8 @@ class InteractionController:
                 if not self._set_state(BotState.SPEAKING, "", gen):
                     return
                 spoke = True
+                log.info("Reply audio starts (audio=whole), %.2f s after the request",
+                         time.monotonic() - turn.sent_at)
                 self._speak(reply, gen, music_start_s)
             elif turn.music_audio and turn.play_on_pi and not self.cfg.ui.text_only:
                 # No reply audio, but the music action carries its track: play that.
