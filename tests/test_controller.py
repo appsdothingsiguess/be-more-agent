@@ -1128,17 +1128,134 @@ def test_normal_turn_is_not_goodbye(rig):
     assert done[-1]["goodbye"] is False and not rig.client.consolidated
 
 
-def test_actions_run_in_order_before_the_reply(rig):
+def _timed(rig, kind, seconds):
+    """A fake UI animation call that logs (kind, name, start time) and lasts seconds."""
+    return lambda name: rig.log.append((kind, name, time.monotonic())) or seconds
+
+
+def _timed_speaker(rig, reply_s=0.0):
+    orig = rig.spk.play
+
+    def play(path, block=True):
+        rig.log.append(("play_at", Path(path).name, time.monotonic()))
+        if not Path(path).name.startswith("sfx-"):
+            time.sleep(reply_s)          # the spoken reply takes a while
+        return orig(path, block)
+    rig.spk.play = play
+
+
+def test_sound_plays_during_the_dance_not_after(rig):
+    """"Can you dance?": dance, bounce, wiggle, victory. The victory sound starts with
+    the dance, and the reply starts once the sound is done, over the animations."""
     from app.server.client import Action
-    rig.ui.play_expression = lambda name: rig.log.append(("expression", name))
-    rig.client.actions = (Action("expression", "dance"), Action("sound", "coin", b"COIN"),
-                          Action("expression", "wink"))
+    rig.ui.play_expression = _timed(rig, "expression", 0.3)
+    _timed_speaker(rig, reply_s=1.0)
+    rig.client.actions = (Action("expression", "dance"), Action("expression", "bounce"),
+                          Action("expression", "wiggle"), Action("sound", "victory", b"WIN"))
     run_text(rig)
-    seq = [e for e in rig.log if e[0] in ("expression", "play")]
-    assert seq[:3] == [("expression", "dance"), ("play", "sfx-1.wav"), ("expression", "wink")]
-    assert seq[3][0] == "play" and seq[3][1] != "sfx-1.wav"      # then the spoken reply
-    assert rig.spk.played[0].read_bytes() == b"COIN"
+    anims = [e for e in rig.log if e[0] == "expression"]
+    plays = [e for e in rig.log if e[0] == "play_at"]
+    assert [e[1] for e in anims] == ["dance", "bounce", "wiggle"]
+    assert plays[0][1] == "sfx-3.wav" and plays[1][1] != "sfx-3.wav"
+    assert plays[0][2] < anims[1][2]               # victory starts while BMO dances
+    assert plays[1][2] < anims[-1][2] + 0.3        # the reply does not wait for the dance
+    assert rig.spk.played[0].read_bytes() == b"WIN"
     assert rig.spk.played[-1].read_bytes() == WAV
+
+
+def test_reply_waits_for_the_sound_queue(rig):
+    from app.server.client import Action
+    _timed_speaker(rig)
+    orig = rig.spk.play
+
+    def slow(path, block=True):
+        r = orig(path, block)
+        if Path(path).name.startswith("sfx-"):
+            time.sleep(0.2)
+            rig.log.append(("sound_end", Path(path).name, time.monotonic()))
+        return r
+    rig.spk.play = slow
+    rig.client.actions = (Action("sound", "coin", b"C1"), Action("sound", "boing", b"C2"))
+    run_text(rig)
+    seq = [e[:2] for e in rig.log if e[0] in ("play_at", "sound_end")]
+    assert seq[:4] == [("play_at", "sfx-0.wav"), ("sound_end", "sfx-0.wav"),
+                       ("play_at", "sfx-1.wav"), ("sound_end", "sfx-1.wav")]
+    assert seq[4][0] == "play_at" and len(seq) == 5
+
+
+def test_emotion_after_the_animations_finish(rig):
+    from app.server.client import Action
+    rig.ui.play_expression = _timed(rig, "expression", 0.2)
+    rig.ui.set_emotion = lambda name: rig.log.append(("emotion", name, time.monotonic()))
+    rig.client.actions = (Action("expression", "wink"), Action("expression", "nod"))
+    rig.client.extra = {"emotion": "excited"}
+    rig.spk.play = lambda path, block=True: time.sleep(0.6) or True
+    run_text(rig)
+    seq = [e for e in rig.log if e[0] in ("expression", "emotion")]
+    assert [e[:2] for e in seq] == [("expression", "wink"), ("expression", "nod"),
+                                    ("emotion", "excited")]
+    assert seq[2][2] - seq[1][2] >= 0.19
+
+
+def test_song_screen_after_the_animations(rig):
+    from app.server.client import Action
+    rig.ui.play_expression = _timed(rig, "expression", 0.2)
+    rig.ui.set_overlay = lambda kind, lyrics=(): rig.log.append(("overlay", kind))
+    rig.client.actions = (Action("expression", "bounce"),)
+    rig.client.extra = {"song": "silly"}
+    rig.spk.play = lambda path, block=True: time.sleep(0.5) or True
+    run_text(rig)
+    assert [e[:2] for e in rig.log if e[0] in ("expression", "overlay")] == [
+        ("expression", "bounce"), ("overlay", "song")]
+
+
+def test_animations_left_when_the_reply_ends_are_dropped(rig):
+    from app.server.client import Action
+    rig.ui.play_expression = _timed(rig, "expression", 0.4)
+    rig.client.actions = tuple(Action("expression", n) for n in ("a", "b", "c", "d"))
+    run_text(rig)          # the reply ends at once
+    time.sleep(0.6)
+    assert len([e for e in rig.log if e[0] == "expression"]) < 4
+
+
+def test_face_show_plays_out_when_nothing_is_spoken(rig):
+    from app.server.client import Action
+    rig.cfg.ui.text_only = True
+    rig.ui.play_expression = _timed(rig, "expression", 0.05)
+    rig.ui.show_face = _timed(rig, "face", 0.05)
+    rig.client.actions = (Action("expression", "wink"), Action("face", "surprised"),
+                          Action("expression", "heart_eyes"))
+    rig.client.calls.clear()
+    rig.ctl.submit_text("show me your faces", speak=False)
+    assert rig.ctl.wait_idle(5)
+    assert [e[1] for e in rig.log if e[0] in ("expression", "face")] == [
+        "wink", "surprised", "heart_eyes"]
+
+
+def test_music_screen_and_looping_dance_at_music_start(rig):
+    """"Dance and play some music": the track starts music_start_s into the reply audio;
+    from then the music screen shows and the dance loops until the audio ends."""
+    rig.ui.play_expression = _timed(rig, "expression", 0.1)
+    rig.ui.set_overlay = lambda kind, lyrics=(): rig.log.append(("overlay", kind, time.monotonic()))
+    rig.client.stream = [_act("music", "dance_party")]
+    rig.client.extra = {"music_start_s": 0.3}
+
+    def play(path, block=True):
+        rig.log.append(("play_at", Path(path).name, time.monotonic()))
+        time.sleep(0.8)
+        rig.log.append(("play_end", Path(path).name, time.monotonic()))
+        return True
+    rig.spk.play = play
+    run_text(rig)
+    time.sleep(0.2)
+    start = next(e[2] for e in rig.log if e[0] == "play_at")
+    end = next(e[2] for e in rig.log if e[0] == "play_end")
+    overlay = [e for e in rig.log if e[0] == "overlay"]
+    dances = [e[2] for e in rig.log if e[0] == "expression" and e[1] == "dance"]
+    assert len(overlay) == 1 and overlay[0][1] == "music"
+    assert overlay[0][2] - start >= 0.29
+    assert len(dances) >= 3 and dances[0] - start >= 0.29
+    assert all(t <= end + 0.01 for t in dances)    # the loop stops with the audio
 
 
 def test_action_sounds_muted_in_text_only(rig):
@@ -1169,25 +1286,31 @@ def test_stream_status_shows_while_thinking(rig):
     assert any(e["type"] == "phase" and e["message"] == "Searching memories..." for e in events)
 
 
-def test_streamed_actions_play_once_in_order_then_emotion_then_reply(rig):
+def test_streamed_actions_play_once_in_two_queues(rig):
     rig.ui.play_expression = lambda name: rig.log.append(("expression", name)) or 0.05
     rig.ui.show_face = lambda name: rig.log.append(("face", name)) or 0.05
     rig.ui.set_emotion = lambda name: rig.log.append(("emotion", name))
+    rig.spk.play = lambda path, block=True: (rig.log.append(("play", Path(path).name)),
+                                             time.sleep(0.4))
     rig.client.extra = {"emotion": "happy"}
     rig.client.stream = [_act("expression", "wink"), _act("face", "surprised"),
                          _act("sound", "coin", b"COIN"), _act("expression", "heart_eyes")]
     run_text(rig)
-    seq = [e for e in rig.log if e[0] in ("expression", "face", "emotion", "play")]
-    assert seq[:5] == [("expression", "wink"), ("face", "surprised"), ("play", "sfx-2.wav"),
-                       ("expression", "heart_eyes"), ("emotion", "happy")]
-    assert seq[5][0] == "play" and len(seq) == 6        # the reply, and nothing replayed
+    anims = [e for e in rig.log if e[0] in ("expression", "face", "emotion")]
+    assert anims == [("expression", "wink"), ("face", "surprised"),
+                     ("expression", "heart_eyes"), ("emotion", "happy")]
+    plays = [e[1] for e in rig.log if e[0] == "play"]
+    assert plays[0] == "sfx-2.wav" and len(plays) == 2      # the reply, nothing replayed
+    assert rig.log.index(("play", "sfx-2.wav")) < rig.log.index(("expression", "heart_eyes"))
 
 
 def test_expression_waits_for_its_animation(rig):
     rig.ui.play_expression = lambda name: 0.3
+    rig.cfg.ui.text_only = True         # nothing spoken: the turn waits for the animation
     rig.client.stream = [_act("expression", "dance")]
     t0 = time.monotonic()
-    run_text(rig)
+    rig.ctl.submit_text("dance", speak=False)
+    assert rig.ctl.wait_idle(5)
     assert time.monotonic() - t0 >= 0.3
 
 

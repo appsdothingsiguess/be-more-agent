@@ -274,6 +274,21 @@ def test_face_music_song_and_memory_changes_are_parsed(server, client):
     assert r.memory_changes == ({"op": "create", "name": "dog-finn"},)
 
 
+@pytest.mark.parametrize("sent,expected", [(4.2, 4.2), (3, 3.0), (0, 0.0), (-1, None),
+                                           ("4.2", None), (True, None)])
+def test_music_start_is_parsed(server, client, sent, expected):
+    server.interact_extra = {"music_start_s": sent, "brand_new_field": {"x": 1},
+                             "actions": [{"type": "hologram", "name": "x"},
+                                         {"type": "music", "name": "dance_party"}]}
+    r = client.interact(text="hi")
+    assert r.music_start_s == expected
+    assert [a.type for a in r.actions] == ["music"]       # unknown types are ignored
+
+
+def test_older_server_has_no_music_start(client):
+    assert client.interact(text="hi").music_start_s is None
+
+
 def _stream_server(server):
     wav = base64.b64encode(b"RIFFcoin").decode()
     server.interact_extra = {"emotion": "happy", "song": {"mood": "happy"},

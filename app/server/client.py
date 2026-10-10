@@ -87,6 +87,13 @@ def clean_song(value) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def clean_seconds(value) -> float | None:
+    """A non-negative number of seconds (music_start_s), or None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value >= 0:
+        return None
+    return float(value)
+
+
 def clean_memory_changes(value) -> tuple:
     return tuple({"op": c["op"], "name": str(c.get("name") or "")}
                  for c in (value if isinstance(value, list) else ())
@@ -117,6 +124,7 @@ class InteractResult:
     statuses: tuple = ()       # str
     song: str | None = None    # mood when BMO sang (the song is in audio_wav)
     memory_changes: tuple = ()  # {"op": create|update|delete, "name"}
+    music_start_s: float | None = None  # where the appended music track starts in audio_wav
 
 
 class BMOClient:
@@ -393,6 +401,7 @@ class BMOClient:
             statuses=clean_statuses(raw.get("statuses")),
             song=clean_song(raw.get("song")),
             memory_changes=clean_memory_changes(raw.get("memory_changes")),
+            music_start_s=clean_seconds(raw.get("music_start_s")),
         )
 
     # -- long-term memory (404 = server has no memory routes) --------------
