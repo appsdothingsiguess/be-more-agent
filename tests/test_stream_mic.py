@@ -88,3 +88,13 @@ def test_configure_delegates_without_capture(tmp_path):
     mic.configure()
     assert calls == [1]
     make(tmp_path)[0].configure()  # no file mic: no-op
+
+
+def test_highpass_removes_rumble_and_keeps_voice():
+    from app.hardware.stream_mic import highpass
+    rate = 16000
+    t = np.arange(rate) / rate
+    rumble = 8000 * np.sin(2 * np.pi * 30 * t)
+    voice = 3000 * np.sin(2 * np.pi * 300 * t)
+    out = highpass((rumble + voice).astype("<i2"), rate, 80.0).astype(float)
+    assert np.sqrt(np.mean((out - voice) ** 2)) < 100

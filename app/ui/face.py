@@ -233,6 +233,13 @@ class FaceAnimator:
         self.dirty = True
         return True
 
+    def clear(self) -> None:
+        """The user cut BMO off: drop the running move, face action, emotion and notes, so
+        the plain face shows at once instead of lingering for seconds."""
+        self._move, self._shown, self.emotion = None, None, None
+        self.overlay, self.lyrics, self.lyric_starts = None, [], None
+        self.dirty = True
+
     def set_overlay(self, kind: str | None, lyrics=()) -> None:
         """Music notes over the face: 'song' (with lyrics), 'music', or None to clear."""
         self.overlay = kind if kind in OVERLAYS else None

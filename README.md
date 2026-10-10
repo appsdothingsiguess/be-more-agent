@@ -183,7 +183,7 @@ While BMO runs (`--headless` or `--gui`), it serves a page from any device on th
 
 ## Hands-free listening
 
-With `wake_word.enabled` (web page toggle) BMO listens for the wake phrase ("Hey Jarvis" until `models/hey_bmo.onnx` exists), records until you stop talking, answers, then listens about 5 s for a follow-up without the wake phrase. It never listens to itself: detection pauses while BMO thinks or plays any sound. Start still works and also stops on silence. Tune the threshold with `./venv/bin/python tools/wake_test.py` (stop the service first; only one program can use the mic). Packages: `requirements-wakeword.txt`.
+With `wake_word.enabled` (web page toggle) BMO listens for the wake phrase ("Hey Jarvis" until `models/hey_bmo.onnx` exists), records until you stop talking, answers, then listens about 5 s for a follow-up without the wake phrase. It never listens to itself: detection pauses while BMO thinks or plays any sound. Start still works and also stops on silence. Before upload, recordings lose everything below 80 Hz (fan/hum rumble that Whisper can turn into words). The log shows each transcript (`Heard (source, turn id): ...`), and the last 10 Pi recordings stay in `runtime/heard/<turn id>.wav` to check a misheard turn. Tune the threshold with `./venv/bin/python tools/wake_test.py` (stop the service first; only one program can use the mic). Packages: `requirements-wakeword.txt`.
 
 ## Device detection
 
@@ -202,7 +202,7 @@ Endpoints used: `GET /v1/status`, `GET /v1/models`, `POST /v1/bmo/reservation`, 
 3. cancels it on the server via `POST /v1/requests/{id}/cancel` using its `X-Request-ID`,
 4. before the next request, waits for `/v1/status` `bmo_ready` and re-confirms the reservation, because a cancel acknowledgement does not mean the GPU is clean.
 
-If you cut BMO off while it was speaking on the Pi (not a web turn), it then listens for a follow-up as after a finished reply, so you can just talk; right after a cut-off reply the wake word alone was missed for many seconds. Sending a new message, starting a new session or shutting down also interrupts, but opens no follow-up.
+If you cut BMO off while it was speaking on the Pi (not a web turn), its face goes straight back to neutral (no lingering emotion, dance or notes) and it listens for a follow-up as after a finished reply, so you can just talk; right after a cut-off reply the wake word alone was missed for many seconds. Sending a new message, starting a new session or shutting down also interrupts, but opens no follow-up.
 
 ## Testing
 

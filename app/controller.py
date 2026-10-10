@@ -95,6 +95,7 @@ class Turn:
     reply_shown: str | None = None  # reply text already shown from the stream
     faced: bool = False             # the reply's face (or singing screen) is queued
     sent_at: float = 0.0            # monotonic time the request went out
+    cut_off: bool = False           # the user interrupted its reply on the Pi
 
 
 class _Lane:
@@ -358,6 +359,8 @@ class InteractionController:
         self._session_stop = threading.Event()
         ReplyStore.purge_legacy(cfg.runtime_path)
         self.replies = ReplyStore(cfg.runtime_path / "replies", keep=8)
+        # The last few Pi mic recordings, by turn id, to check what Whisper heard.
+        self.heard = ReplyStore(cfg.runtime_path / "heard", keep=10)
 
     # ------------------------------------------------------------------ state
     @property
@@ -952,7 +955,10 @@ class InteractionController:
         if self._state is BotState.LISTENING:
             self.cancel_listening()
             return
-        cut_off = followup and self._state is BotState.SPEAKING
+        turn = self._turn
+        if turn is not None and followup and self._state is BotState.SPEAKING:
+            # Before the speaker stops: that lets the turn thread finish and emit turn_done.
+            turn.cut_off = True
         # 1. Stop physical playback immediately.
         try:
             self.speaker.stop()
@@ -971,10 +977,12 @@ class InteractionController:
                              name="bmo-cancel", daemon=True).start()
         # 4. Readiness is re-checked by the next turn (see _run_turn).
         self._set_state(BotState.IDLE, "Interrupted")
+        clear_face = getattr(self.ui, "clear_face", None)
+        if clear_face is not None:
+            clear_face()
         turn = self._turn
         if turn is not None:
-            self._finish_turn(turn, ok=False, spoke=cut_off and turn.play_on_pi,
-                              interrupted=cut_off)
+            self._finish_turn(turn, ok=False, spoke=False)
 
     # ------------------------------------------------------------------ turns
     def _spawn(self, turn: Turn, *, record: bool = False, text: str | None = None,
@@ -986,7 +994,7 @@ class InteractionController:
                                  "own_audio": own_audio},
                          name=f"bmo-turn-{turn.gen}", daemon=True).start()
 
-    def _finish_turn(self, turn: Turn, ok: bool, spoke: bool, interrupted: bool = False) -> None:
+    def _finish_turn(self, turn: Turn, ok: bool, spoke: bool) -> None:
         """Emit turn_done exactly once per turn and release it."""
         with self._lock:
             if turn.done:
@@ -994,9 +1002,10 @@ class InteractionController:
             turn.done = True
             if self._turn is turn:
                 self._turn = None
+        cut_off = turn.cut_off and turn.play_on_pi
         self._emit({"type": "turn_done", "turn": turn.id, "source": turn.source,
-                    "client_id": turn.client_id, "ok": ok, "spoke_on_pi": spoke,
-                    "goodbye": turn.goodbye, "interrupted": interrupted})
+                    "client_id": turn.client_id, "ok": ok, "spoke_on_pi": spoke or cut_off,
+                    "goodbye": turn.goodbye, "interrupted": cut_off})
         if turn.goodbye and ok:
             # Conversation over: save it to long-term memory and start fresh for next time.
             threading.Thread(target=self.end_session, args=("goodbye",),
@@ -1189,6 +1198,10 @@ class InteractionController:
                 if audio is None:
                     self.notify("nothing_heard", gen=gen)
                     return
+                try:
+                    self.heard.save(turn.id, Path(audio).read_bytes())
+                except OSError as e:
+                    log.warning("Could not keep the recording: %s", e)
 
             image = None
             if self._want_image():
@@ -1249,6 +1262,8 @@ class InteractionController:
             if not end_session:
                 self._remember(result, text, use_memory, epoch)
 
+            if result.transcript:
+                log.info("Heard (%s, turn %s): %r", turn.source, turn.id, result.transcript)
             self.last_transcript = result.transcript or text
             self.last_reply = result.text
             if self.last_transcript and self.last_transcript != turn.heard:

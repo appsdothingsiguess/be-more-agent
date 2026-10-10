@@ -371,6 +371,11 @@ class TkUI:
         self._post(lambda: self.animator.show_face(name, time.monotonic()))
         return FACE_ACTION_S
 
+    def clear_face(self) -> None:
+        """After an interrupt: back to the plain face right away (see FaceAnimator.clear)."""
+        if self.animator is not None:
+            self._post(self.animator.clear)
+
     def set_overlay(self, kind: str | None, lyrics=()) -> None:
         """Music notes over the face while BMO sings ('song', with lyrics) or plays 'music'."""
         if self.animator is not None:

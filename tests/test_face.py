@@ -490,3 +490,16 @@ def test_envelope_from_wav_bytes(tmp_path):
     make_wav(tmp_path / "a.wav", rate=22050, secs=0.4)
     env, window = face.envelope_from_wav((tmp_path / "a.wav").read_bytes())
     assert env and env == face.envelope_from_wav(tmp_path / "a.wav")[0]
+
+
+def test_clear_drops_move_emotion_and_notes_at_once(faces):
+    a = face.FaceAnimator(faces, random.Random(1))
+    a.set_state(BotState.SPEAKING, 0)
+    a.set_emotion("happy", 0.1)
+    a.play_expression("dance", 0.2)
+    a.set_overlay("music")
+    a.set_state(BotState.IDLE, 0.5)        # an emotion would linger EMOTION_HOLD_S
+    a.clear()
+    run(a, 0.5, 0.3)
+    assert a._active_move(0.8) is None and a.overlay is None
+    assert a._target_key[0] == "neutral"

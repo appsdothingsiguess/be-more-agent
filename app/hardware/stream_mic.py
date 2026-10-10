@@ -10,6 +10,22 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
+# Below this the mic picks up mostly rumble and hum (~30 and 60 Hz, most of the energy in a
+# quiet room), which Whisper can turn into words. Voices start around 85 Hz.
+HIGHPASS_HZ = 80.0
+
+
+def highpass(pcm: np.ndarray, rate: int, cutoff: float) -> np.ndarray:
+    """Remove everything below cutoff (a raised-cosine fade over one octave), whole clip."""
+    if len(pcm) < 2:
+        return pcm
+    spec = np.fft.rfft(pcm.astype(np.float64))
+    freqs = np.fft.rfftfreq(len(pcm), 1.0 / rate)
+    fade = np.clip((freqs - cutoff / 2) / (cutoff / 2), 0.0, 1.0)
+    spec *= 0.5 - 0.5 * np.cos(np.pi * fade)
+    out = np.fft.irfft(spec, n=len(pcm))
+    return np.clip(np.round(out), -32768, 32767).astype("<i2")
+
 
 class StreamMicrophone:
     def __init__(self, cfg, capture, file_mic=None, runtime_dir: Path | None = None):
@@ -63,6 +79,7 @@ class StreamMicrophone:
         rate = self.capture.rate
         if len(pcm) / rate < self.cfg.microphone.min_seconds:
             return None
+        pcm = highpass(pcm, rate, HIGHPASS_HZ)
         with wave.open(str(self.upload_path), "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)

@@ -1574,3 +1574,45 @@ def test_interrupt_while_thinking_is_not_marked_interrupted(rig):
     rig.client.block.set()
     _join_turns()
     assert of(events, "turn_done")[0]["interrupted"] is False
+
+
+def test_interrupt_marked_even_when_the_turn_thread_finishes_first(rig):
+    # A real speaker unblocks the turn thread on stop(), which then emits turn_done
+    # before interrupt() gets to it: the mark must already be on the turn.
+    rig.spk.block = True
+    events = collect(rig.ctl)
+    stop = rig.spk.stop
+
+    def stop_and_let_the_turn_finish():
+        stop()
+        deadline = time.monotonic() + 5
+        while not of(events, "turn_done") and time.monotonic() < deadline:
+            time.sleep(0.01)
+    rig.spk.stop = stop_and_let_the_turn_finish
+    rig.ctl.submit_text("hi", source="wake")
+    assert rig.spk.playing.wait(5)
+    rig.ctl.interrupt()
+    _join_turns()
+    done = of(events, "turn_done")
+    assert len(done) == 1 and done[0]["interrupted"] is True and done[0]["spoke_on_pi"] is True
+
+
+def test_interrupt_clears_the_face(rig):
+    cleared = []
+    rig.ui.clear_face = lambda: cleared.append(True)
+    rig.spk.block = True
+    rig.ctl.submit_text("hi")
+    assert rig.spk.playing.wait(5)
+    rig.ctl.interrupt()
+    assert cleared
+
+
+def test_pi_recording_is_kept_by_turn_id(rig):
+    events = collect(rig.ctl)
+    rig.ctl.handle_action(Action.START)
+    rig.ctl.handle_action(Action.START)
+    assert rig.ctl.wait_idle(5)
+    _join_turns()
+    tid = of(events, "turn_done")[0]["turn"]
+    kept = rig.cfg.runtime_path / "heard" / f"{tid}.wav"
+    assert kept.read_bytes() == rig.audio.read_bytes()
